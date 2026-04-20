@@ -1,0 +1,15 @@
+[project]
+name = "bmd5302-project"
+version = "0.1.0"
+description = "Excel-driven automation workflow for Test.xlsm"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "ipykernel>=7.2.0",
+    "pandas>=3.0.2",
+    "pillow>=12.2.0",
+    "xlwings>=0.16.6",
+]
+
+[project.scripts]
+bmd5302-test = "main:main"
