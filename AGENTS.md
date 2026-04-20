@@ -68,3 +68,22 @@
   - `ExcelChartExporter` for chart extraction strategy
   - `ExcelWorkbookRunner` for orchestration and future workflow expansion
 - If the workbook contract changes later, prefer updating `WorkbookContract` or subclassing the runner/exporter instead of scattering new literals throughout the codebase.
+
+## MCP Server Learnings and Rules
+
+- The MCP server entrypoint is `excel_mcp_server.py`.
+- Default transport for this repo should be HTTP (`streamable-http`) rather than `stdio`.
+- Default MCP HTTP endpoint contract:
+  - host: `0.0.0.0`
+  - port: `8000`
+  - path: `/mcp`
+- Use `mcp.sh` as the canonical launcher for local development and deployment-style runs:
+  - `./mcp.sh` uses all defaults
+  - positional overrides are supported in order: `PORT HOST STREAMABLE_HTTP_PATH TRANSPORT MOUNT_PATH`
+- Keep Excel as the backend engine for all MCP tools:
+  - tools must call `ExcelWorkbookRunner` and workbook macros
+  - do not replicate workbook formulas or macro logic in MCP/Python code
+- The server includes an image-returning tool (`run_normal_test_single_with_chart_image`) that returns MCP image content blocks for chart rendering in compatible clients.
+- Client compatibility expectation:
+  - some MCP clients render image content directly
+  - text-only clients should rely on returned chart file paths

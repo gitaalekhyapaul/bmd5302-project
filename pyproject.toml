@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "ipykernel>=7.2.0",
+    "mcp>=1.18.0",
     "pandas>=3.0.2",
     "pillow>=12.2.0",
     "xlwings>=0.16.6",
@@ -13,3 +14,21 @@ dependencies = [
 
 [project.scripts]
 bmd5302-test = "main:main"
+bmd5302-mcp = "excel_mcp_server:main"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.11",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# Keep lint output focused on real errors.
+select = ["E", "F"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

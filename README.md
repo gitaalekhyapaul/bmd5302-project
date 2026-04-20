@@ -61,6 +61,20 @@ Create or refresh the environment with `uv`:
 uv sync
 ```
 
+## Formatting and Linting (Ruff)
+
+Format entire repo:
+
+```bash
+uv run ruff format .
+```
+
+Lint entire repo (errors only):
+
+```bash
+uv run ruff check .
+```
+
 If you want to launch the notebook UI directly without installing Jupyter globally:
 
 ```bash
@@ -105,6 +119,55 @@ Visible Excel window:
 
 ```bash
 uv run bmd5302-test "24" --visible
+```
+
+## Exposing Excel As MCP Tools
+
+This repo now includes an MCP server in `excel_mcp_server.py` so AI clients can call workbook calculations as tools over HTTP.
+
+### Start the server (HTTP)
+
+```bash
+./mcp.sh
+```
+
+### Override default port (or other settings)
+
+```bash
+./mcp.sh 9000
+./mcp.sh 9000 127.0.0.1 /mcp streamable-http
+```
+
+### Exposed MCP tools
+
+- `run_normal_test(sample_counts, workbook_path="Test.xlsm", output_dir="notebook_outputs", visible=False)`
+  - `sample_counts` accepts the same formats as CLI input, for example: `"24"` or `"10,25,50"`
+  - writes each value to `NormalTest!B1`, runs `GenerateNormalData`, and returns table rows plus chart/workbook artifact paths
+- `run_normal_test_single(sample_count, workbook_path="Test.xlsm", output_dir="notebook_outputs", visible=False)`
+  - single-run convenience wrapper
+- `run_normal_test_single_with_chart_image(sample_count, workbook_path="Test.xlsm", output_dir="notebook_outputs", visible=False)`
+  - returns MCP image content for the generated chart (plus basic metadata)
+  - clients that support MCP `image` blocks can render the chart inline
+- `get_workbook_contract()`
+  - returns the active workbook contract (sheet, input cell, macro, table columns, chart)
+
+### HTTP endpoint
+
+By default, clients should connect to:
+
+- `http://127.0.0.1:8000/mcp`
+- `http://<this-machine-ip>:8000/mcp` (for other devices/agents on your network)
+
+Many clients use a URL-based MCP config similar to:
+
+```json
+{
+  "mcpServers": {
+    "excel-workbook": {
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
 ```
 
 ## Outputs
