@@ -3,19 +3,22 @@
 ## Status
 
 - Implemented the core `Model.xlsm` MCP workflow in `model_workflow.py` and `mcp_server.py`.
-- Kept the old `Test.xlsm` flow for compatibility, but `Model.xlsm` is now the primary MCP direction.
+- Removed the repo's legacy `Test.xlsm` workflow, CLI entrypoint, and workbook artifacts.
+- Consolidated shared Excel automation helpers into `excel_workbook_support.py`.
 - Implemented disk-backed session storage under `notebook_outputs/model_sessions/<session_id>/`.
 - Implemented preferred MCP elicitation support for:
   - questionnaire answer collection
   - short-selling choice collection
 - Kept structured fallback paths for clients that do not support elicitation.
-- Added a repo-local installable skill bundle under `skills/bmd5302-robo-advisor/` so LLM frontends can follow the intended robo-adviser tool flow and explanation style.
+- Named the robo-adviser `Sandra` and aligned the repo-local skill plus MCP-facing descriptions to that persona.
+- Added a notebook test surface for the `Model.xlsm` flow with variable-based knobs instead of notebook input widgets.
+- Added a root-workbook session option so notebook or MCP runs can target the project-root workbook when reducing repeated workbook trust prompts matters more than session isolation.
 
 ## Active Direction
 
-The primary MCP workflow in this repository now targets `Model.xlsm`.
+The repository should expose one workbook-backed robo-adviser workflow centered on `Model.xlsm`.
 
-The implementation should keep Excel as the source of truth and use the workbook's own sheets, buttons, macros, cells, and charts as the workflow API. Python and the MCP server should orchestrate workbook execution, persist session state, and format workbook-generated outputs for the user.
+The implementation should keep Excel as the source of truth and use the workbook's own sheets, buttons, macros, cells, and charts as the workflow API. Python and the MCP server should orchestrate workbook execution, persist session state, and format workbook-generated outputs for the user. Sandra is the user-facing adviser identity for this workflow and should speak in a professional financial-adviser tone while staying grounded in workbook outputs.
 
 ## Target Flow
 
@@ -95,7 +98,7 @@ Each questionnaire run should get its own session directory under `notebook_outp
 
 Each session directory should contain:
 
-- a persistent workbook copy of `Model.xlsm`
+- a persistent workbook copy of `Model.xlsm`, unless the run explicitly opts into using the project-root workbook
 - a small `session.json` file with durable metadata
 
 The session metadata should include:
@@ -103,6 +106,8 @@ The session metadata should include:
 - `session_id`
 - `created_at`
 - `updated_at`
+- `advisor_name`
+- `use_source_workbook`
 - workbook copy path
 - question metadata extracted from rows `9:18`
 - normalized option lists
@@ -117,29 +122,36 @@ Excel application objects should not be stored across requests. Each tool call s
 
 ## Implementation Shape
 
-Keep `mcp_server.py` as the MCP entrypoint, but add a dedicated `Model.xlsm` workflow instead of extending the old `Test.xlsm` assumptions.
+Keep `mcp_server.py` as the MCP entrypoint for the `Model.xlsm` workflow only.
 
-Reuse only the generic pieces from the existing workflow:
+Reuse only the generic Excel automation pieces that are still shared:
 
-- workbook copy and output path handling
 - macro invocation
 - chart export
 - Excel exception logging
 
-Do not reuse the old workbook contract literally.
+The `Model.xlsm` workflow should keep its own contract and result types.
 
-The `Model.xlsm` workflow should have its own contract and result types, following the same class-based style already used in `normal_test_workflow.py`.
+Current reusable modules and types:
 
-Expected additions:
-
-- a `ModelWorkbookContract`
-- session path helpers
+- `ModelWorkbookContract`
+- `ModelSessionPaths`
 - questionnaire/result dataclasses
-- a dedicated runner for the `Model.xlsm` workflow
-- new MCP tools for:
-  - starting the questionnaire
-  - submitting answers
-  - running the final optimizer/MVP flow
+- `ModelWorkbookRunner`
+- `ExcelChartExporter`
+- `call_vba_macro`
+- `log_excel_exception`
+
+## Notebook Direction
+
+Keep a repo-local notebook that can test the end-to-end `Model.xlsm` scraping and execution flow without relying on widget inputs.
+
+That notebook should:
+
+- expose knobs as top-level Python variables
+- default to the project-root `Model.xlsm`
+- allow switching between copied-workbook mode and project-root-workbook mode
+- display the scraped questions, workbook-generated profile, final summary table, and exported charts
 
 ## Compatibility Rule
 
@@ -164,5 +176,6 @@ The repo-local skill should stay aligned with the implemented MCP flow and the p
 
 - `SKILL.md` should stay lean and focus on trigger conditions, workflow order, and guardrails
 - report-specific finance and platform context should live in skill reference files, not the main skill body
-- the skill should assume `Model.xlsm` and the MCP tools remain the operational source of truth
+- the skill should assume `Model.xlsm` and Sandra's MCP tools remain the operational source of truth
+- the skill metadata should present Sandra as a professional financial adviser rather than a generic workbook runner
 - if tool names, session payloads, or workflow order change, update the skill bundle together with `README.md` and this plan

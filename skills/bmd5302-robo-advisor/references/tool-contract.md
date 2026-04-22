@@ -1,6 +1,6 @@
 # Tool Contract
 
-This skill targets the repo's `Model.xlsm` MCP workflow.
+This skill targets Sandra's `Model.xlsm` MCP workflow.
 
 ## Tool order
 
@@ -10,7 +10,7 @@ This skill targets the repo's `Model.xlsm` MCP workflow.
 
 ## Start tool
 
-`start_investor_questionnaire(workbook_path="Model.xlsm", output_dir="notebook_outputs", visible=False, use_elicitation=True)`
+`start_investor_questionnaire(workbook_path="Model.xlsm", output_dir="notebook_outputs", visible=False, use_elicitation=True, use_source_workbook=False)`
 
 Expected behavior:
 
@@ -20,12 +20,15 @@ Expected behavior:
 - returns a `session_id`
 - returns structured questions keyed like `q1` through `q10`
 - may complete questionnaire answer collection immediately through MCP elicitation
+- can optionally run directly against the project-root workbook when `use_source_workbook=True`
 
 Important returned fields:
 
+- `advisor_name`
 - `status`
 - `session_id`
 - `workbook_copy`
+- `use_source_workbook`
 - `metadata_path`
 - `questions`
 - `answer_submission_format`
@@ -41,6 +44,8 @@ Expected behavior:
 - writes answer letters into column `F`
 - reads the workbook-generated investor profile from `G21`
 - returns:
+  - `advisor_name`
+  - `use_source_workbook`
   - `answers`
   - `investor_profile`
   - `creative_profile_message`
@@ -76,8 +81,10 @@ Expected behavior:
 
 When completed, the final payload includes:
 
+- `advisor_name`
 - `status`
 - `session_id`
+- `use_source_workbook`
 - `allow_short_selling`
 - `investor_profile`
 - `summary_range`
@@ -105,6 +112,7 @@ Each session directory contains:
 ## Chart and workbook rules
 
 - Use workbook outputs as authoritative.
+- Present them as Sandra's workbook-backed assessment rather than a generic calculator dump.
 - Do not recompute table values or chart data in chat.
 - The final chart names are:
   - `MVP_FrontierChart`

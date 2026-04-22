@@ -19,6 +19,7 @@
 ## Current Workbook Contract
 
 - Primary MCP workbook: `Model.xlsm`
+- Named robo-adviser persona: `Sandra`
 - Questionnaire sheet: `1_Questionnaire`
 - Questionnaire macro: `RandomizeQuestions`
 - Question rows: `A9:F18`
@@ -34,7 +35,6 @@
 - Final calculator macro: `CalculateMVP`
 - Final summary range: `A18:D28`
 - Final chart names: `MVP_FrontierChart`, `OptimalWeight_Chart`
-- Legacy workbook flow kept for compatibility: `Test.xlsm` on `NormalTest!B1` with `GenerateNormalData`, `C:D`, and `NormalDataChart`
 
 ## Excel Automation Learnings
 
@@ -48,6 +48,7 @@
 - The stable workbook interaction pattern in this repo is:
   - keep persistent copied workbooks under `notebook_outputs/`
   - use session-scoped workbook copies for the `Model.xlsm` questionnaire flow
+  - allow an explicit project-root workbook mode when repeated workbook trust prompts are the bigger operational problem
   - save the workbook after macro execution
   - read only the explicitly requested output ranges
 - Default write rule:
@@ -73,9 +74,10 @@
 ## Notebook and Runtime Learnings
 
 - Jupyter can hold stale imports after workflow edits.
-- After changing `normal_test_workflow.py`, prefer:
+- After changing `model_workflow.py` or `excel_workbook_support.py`, prefer:
   - explicit `importlib.reload(...)` in the notebook
   - a kernel restart if outputs still reflect old code paths
+- Prefer notebook knobs as Python variables instead of interactive input widgets for this repo.
 - When Excel automation fails, print the original traceback before raising the wrapped runtime error so notebook users can diagnose the real backend failure.
 
 ## Production Extension Guidance
@@ -83,7 +85,8 @@
 - Reuse class-based workbook runners instead of scattering new global helpers.
 - Current reusable extension points:
   - `ExcelChartExporter` for chart extraction strategy
-  - `ExcelWorkbookRunner` for the legacy `Test.xlsm` workflow
+  - `call_vba_macro` for workbook macro invocation
+  - `log_excel_exception` for wrapped Excel failures
   - `ModelWorkbookRunner` for the session-backed `Model.xlsm` workflow
 - If the workbook contract changes later, prefer updating the relevant workbook contract or runner instead of scattering new literals throughout the codebase.
 
@@ -102,7 +105,7 @@
   - tools must call the workbook runners and workbook macros
   - do not replicate workbook formulas or macro logic in MCP/Python code
 - Prefer MCP elicitation when the client declares elicitation support for questionnaire or yes/no input capture.
-- The server includes image-returning tools for both the legacy chart flow and the `Model.xlsm` sheet-2 chart flow.
+- The server includes image-returning tools for the `Model.xlsm` sheet-2 chart flow.
 - Client compatibility expectation:
   - some MCP clients render image content directly
   - text-only clients should rely on returned chart file paths or the structured fallback payload

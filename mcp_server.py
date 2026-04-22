@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 from typing import Any
 
 import mcp.types as mcp_types
@@ -10,29 +9,12 @@ from mcp.server.fastmcp import Context  # type: ignore[import-not-found]
 from mcp.server.fastmcp.utilities.types import Image  # type: ignore[import-not-found]
 
 from model_workflow import (
+    ADVISOR_NAME,
     ModelWorkbookContract,
     ModelWorkbookRunner,
     ShortSellingChoice,
     accepted_answers_from_elicitation,
 )
-from normal_test_workflow import ExcelWorkbookRunner, RunResult, parse_sample_counts
-
-
-def _serialize_run_result(result: RunResult) -> dict[str, Any]:
-    return {
-        "sample_count": int(result.sample_count),
-        "workbook_copy": str(result.workbook_copy),
-        "chart_path": str(result.chart_path),
-        "sample_table": result.sample_table.to_dict(orient="records"),
-        "sample_table_columns": list(result.sample_table.columns),
-    }
-
-
-def _resolve_paths(workbook_path: str, output_dir: str) -> tuple[str, str]:
-    return (
-        str(Path(workbook_path).expanduser().resolve()),
-        str(Path(output_dir).expanduser().resolve()),
-    )
 
 
 def _supports_elicitation(context: Context | None) -> bool:
@@ -46,107 +28,13 @@ def _supports_elicitation(context: Context | None) -> bool:
     )
 
 
-def _run_inputs(
-    sample_counts: list[int],
-    workbook_path: str,
-    output_dir: str,
-    visible: bool,
-) -> tuple[str, str, list[RunResult]]:
-    runner = ExcelWorkbookRunner.from_paths(
-        workbook_path=workbook_path,
-        output_dir=output_dir,
-    )
-    resolved_workbook_path, resolved_output_dir = _resolve_paths(
-        workbook_path=workbook_path,
-        output_dir=output_dir,
-    )
-    results = runner.run_for_inputs(sample_counts, visible=visible)
-    return resolved_workbook_path, resolved_output_dir, results
-
-
 def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
     mcp = FastMCP(
-        "excel-workbook-mcp",
+        "sandra-robo-advisor-mcp",
         host=host,
         port=port,
         streamable_http_path=streamable_http_path,
     )
-
-    @mcp.tool()
-    def run_normal_test(
-        sample_counts: str,
-        workbook_path: str = "Test.xlsm",
-        output_dir: str = "notebook_outputs",
-        visible: bool = False,
-    ) -> dict[str, Any]:
-        """Run Test.xlsm using one or more sample counts and return workbook outputs."""
-        parsed_counts = parse_sample_counts(sample_counts)
-        resolved_workbook_path, resolved_output_dir, results = _run_inputs(
-            sample_counts=parsed_counts,
-            workbook_path=workbook_path,
-            output_dir=output_dir,
-            visible=visible,
-        )
-        return {
-            "workbook_path": resolved_workbook_path,
-            "output_dir": resolved_output_dir,
-            "runs": [_serialize_run_result(result) for result in results],
-        }
-
-    @mcp.tool()
-    def run_normal_test_single(
-        sample_count: int,
-        workbook_path: str = "Test.xlsm",
-        output_dir: str = "notebook_outputs",
-        visible: bool = False,
-    ) -> dict[str, Any]:
-        """Run Test.xlsm once for a single sample count."""
-        resolved_workbook_path, resolved_output_dir, results = _run_inputs(
-            sample_counts=[sample_count],
-            workbook_path=workbook_path,
-            output_dir=output_dir,
-            visible=visible,
-        )
-        return {
-            "workbook_path": resolved_workbook_path,
-            "output_dir": resolved_output_dir,
-            "run": _serialize_run_result(results[0]),
-        }
-
-    @mcp.tool(structured_output=False)
-    def run_normal_test_single_with_chart_image(
-        sample_count: int,
-        workbook_path: str = "Test.xlsm",
-        output_dir: str = "notebook_outputs",
-        visible: bool = False,
-    ) -> list[dict[str, Any] | Image]:
-        """Run once and return the chart as MCP image content."""
-        _, _, results = _run_inputs(
-            sample_counts=[sample_count],
-            workbook_path=workbook_path,
-            output_dir=output_dir,
-            visible=visible,
-        )
-        result = results[0]
-        return [
-            {
-                "sample_count": int(result.sample_count),
-                "workbook_copy": str(result.workbook_copy),
-                "chart_path": str(result.chart_path),
-            },
-            Image(path=result.chart_path),
-        ]
-
-    @mcp.tool()
-    def get_workbook_contract() -> dict[str, str]:
-        """Return the current workbook contract used by this MCP server."""
-        return {
-            "sheet_name": "NormalTest",
-            "input_cell": "B1",
-            "macro_name": "GenerateNormalData",
-            "sample_table_columns": "C:D",
-            "chart_name": "NormalDataChart",
-        }
 
     @mcp.tool()
     async def start_investor_questionnaire(
@@ -154,14 +42,16 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         output_dir: str = "notebook_outputs",
         visible: bool = False,
         use_elicitation: bool = True,
+        use_source_workbook: bool = False,
         context: Context | None = None,
     ) -> dict[str, Any]:
-        """Start a Model.xlsm investor questionnaire session and optionally elicit answers."""
+        """Start Sandra's questionnaire session and optionally elicit answers."""
         runner = ModelWorkbookRunner()
         state = runner.start_questionnaire_session(
             workbook_path=workbook_path,
             output_dir=output_dir,
             visible=visible,
+            use_source_workbook=use_source_workbook,
         )
         payload = runner.serialize_start_payload(state)
         payload["elicitation_supported"] = _supports_elicitation(context)
@@ -176,8 +66,8 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         schema = runner.build_questionnaire_elicitation_model(state.questions)
         elicitation_result = await context.elicit(
             message=(
-                "Please answer the investor questionnaire generated from Model.xlsm. "
-                "Choose one letter for each question."
+                "Sandra is ready to begin the Model.xlsm investor questionnaire. "
+                "Please choose one answer letter for each question."
             ),
             schema=schema,
         )
@@ -207,7 +97,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         output_dir: str = "notebook_outputs",
         visible: bool = False,
     ) -> dict[str, Any]:
-        """Write investor questionnaire answers into Model.xlsm and return the workbook profile."""
+        """Write questionnaire answers into Model.xlsm and return Sandra's workbook profile."""
         runner = ModelWorkbookRunner()
         state = runner.submit_answers(
             session_id=session_id,
@@ -226,12 +116,13 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         use_elicitation: bool = True,
         context: Context | None = None,
     ) -> dict[str, Any]:
-        """Run the final Model.xlsm optimizer and MVP flow for an investor questionnaire session."""
+        """Run Sandra's final optimizer and MVP flow for a questionnaire session."""
         runner = ModelWorkbookRunner()
 
         if allow_short_selling is None:
             state = runner.load_session_state(session_id=session_id, output_dir=output_dir)
             payload = {
+                "advisor_name": ADVISOR_NAME,
                 "status": "short_selling_choice_required",
                 "session_id": state.session_id,
                 "investor_profile": state.investor_profile,
@@ -246,7 +137,10 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
                 return payload
 
             elicitation_result = await context.elicit(
-                message="Would you like to allow short selling for the optimizer run?",
+                message=(
+                    "Sandra is ready to run the optimizer. "
+                    "Would you like to allow short selling?"
+                ),
                 schema=ShortSellingChoice,
             )
             payload["elicitation_action"] = elicitation_result.action
@@ -276,7 +170,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         use_elicitation: bool = True,
         context: Context | None = None,
     ) -> list[dict[str, Any] | Image]:
-        """Run the final Model.xlsm MVP flow and return the sheet 2 charts as MCP images."""
+        """Run Sandra's final Model.xlsm MVP flow and return the sheet 2 charts as MCP images."""
         payload = await run_investor_mvp(
             session_id=session_id,
             allow_short_selling=allow_short_selling,
@@ -297,9 +191,10 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
 
     @mcp.tool()
     def get_model_workbook_contract() -> dict[str, Any]:
-        """Return the active Model.xlsm workbook contract used by the investor tools."""
+        """Return the active Model.xlsm workbook contract used by Sandra's investor tools."""
         contract = ModelWorkbookContract()
         return {
+            "advisor_name": ADVISOR_NAME,
             "questionnaire_sheet": contract.questionnaire_sheet,
             "questionnaire_macro_name": contract.questionnaire_macro_name,
             "question_range": (
@@ -324,7 +219,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run Excel workbook MCP server over HTTP.",
+        description="Run Sandra's workbook-backed MCP server over HTTP.",
     )
     parser.add_argument(
         "--transport",

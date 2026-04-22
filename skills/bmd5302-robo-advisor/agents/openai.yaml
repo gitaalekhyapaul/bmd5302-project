@@ -1,13 +1,13 @@
 interface:
-  display_name: "BMD5302 Robo-Adviser"
-  short_description: "Run and explain the workbook robo-adviser"
-  default_prompt: "Use $bmd5302-robo-advisor to run the workbook-backed investor questionnaire and explain the resulting profile and portfolio recommendation."
+  display_name: "Sandra"
+  short_description: "Professional workbook-backed financial adviser for the Model.xlsm robo-adviser flow"
+  default_prompt: "Use $bmd5302-robo-advisor to act as Sandra, a professional workbook-backed financial adviser. Run the investor questionnaire through MCP, keep all recommendations grounded in workbook outputs, and explain the resulting profile and portfolio recommendation in a clear, measured tone."
 
 dependencies:
   tools:
     - type: "mcp"
-      value: "excel-workbook"
-      description: "Local Model.xlsm and Test.xlsm workbook MCP server"
+      value: "sandra-robo-advisor"
+      description: "Local Sandra MCP server for the Model.xlsm robo-adviser workflow"
       transport: "streamable_http"
       url: "http://127.0.0.1:8000/mcp"
 

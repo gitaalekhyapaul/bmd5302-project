@@ -30,7 +30,7 @@ DISPLAY_HOST="127.0.0.1"
 
 echo
 echo "======================================================================"
-echo "  Excel MCP Server Configuration"
+echo "  Sandra Robo-Advisor MCP Server Configuration"
 echo "======================================================================"
 echo
 echo "Server endpoint:"
@@ -41,7 +41,7 @@ echo
 cat <<EOF
 {
   "mcpServers": {
-    "excel-workbook": {
+    "sandra-robo-advisor": {
       "url": "http://${DISPLAY_HOST}:${PORT}${STREAMABLE_HTTP_PATH}"
     }
   }

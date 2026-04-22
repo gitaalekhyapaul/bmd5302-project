@@ -1,6 +1,6 @@
 # Report Context
 
-This reference summarizes the project report `BMD5302_Robo_Adviser_Report.docx` so the skill can explain the robo-adviser without loading the full document.
+This reference summarizes the project report `BMD5302_Robo_Adviser_Report.docx` so Sandra can explain the robo-adviser without loading the full document.
 
 ## System summary
 
@@ -9,6 +9,8 @@ The report describes a workbook-backed robo-adviser with three linked parts:
 - an efficient-frontier engine built from five years of monthly NAV data for ten FSMOne-listed funds
 - a 100-question risk questionnaire that produces a personalized Arrow-Pratt risk-aversion value
 - an Excel and VBA platform that turns the questionnaire result into an optimized portfolio recommendation
+
+Sandra is the presentation layer around that workbook-backed engine. She should explain the system in a professional adviser voice, but the calculations still come from the workbook.
 
 The stated user journey is:
 

@@ -10,13 +10,19 @@ import string
 from typing import Any
 from uuid import uuid4
 
-import mcp.types as mcp_types
 import pandas as pd
 from pydantic import BaseModel, Field, create_model
-from mcp.server.fastmcp import Context
 import xlwings as xw
 
-from normal_test_workflow import ExcelChartExporter, ExcelWorkbookRunner, WorkbookContract
+from excel_workbook_support import (
+    ExcelChartExporter,
+    ExcelChartSpec,
+    call_vba_macro,
+    log_excel_exception,
+)
+
+
+ADVISOR_NAME = "Sandra"
 
 
 def _utc_now_iso() -> str:
@@ -38,17 +44,6 @@ def _normalize_option_lines(raw_value: Any) -> list[str]:
         values = str(raw_value).splitlines()
 
     return [line.strip() for line in values if str(line).strip()]
-
-
-def _supports_elicitation(context: Context | None) -> bool:
-    if context is None:
-        return False
-
-    return context.session.check_client_capability(
-        mcp_types.ClientCapabilities(
-            elicitation=mcp_types.ElicitationCapability(),
-        )
-    )
 
 
 def _normalize_answer_letter(value: str) -> str:
@@ -105,6 +100,7 @@ class QuestionnaireSessionState:
     session_id: str
     source_workbook_path: str
     workbook_copy: str
+    use_source_workbook: bool
     chart_dir: str
     metadata_path: str
     created_at: str
@@ -124,6 +120,7 @@ class QuestionnaireSessionState:
             "session_id": self.session_id,
             "source_workbook_path": self.source_workbook_path,
             "workbook_copy": self.workbook_copy,
+            "use_source_workbook": self.use_source_workbook,
             "chart_dir": self.chart_dir,
             "metadata_path": self.metadata_path,
             "created_at": self.created_at,
@@ -145,6 +142,7 @@ class QuestionnaireSessionState:
             session_id=str(payload["session_id"]),
             source_workbook_path=str(payload["source_workbook_path"]),
             workbook_copy=str(payload["workbook_copy"]),
+            use_source_workbook=bool(payload.get("use_source_workbook", False)),
             chart_dir=str(payload["chart_dir"]),
             metadata_path=str(payload["metadata_path"]),
             created_at=str(payload["created_at"]),
@@ -200,6 +198,7 @@ class ModelSessionPaths:
         workbook_path: str | Path = "Model.xlsm",
         output_dir: str | Path = "notebook_outputs",
         session_id: str | None = None,
+        use_source_workbook: bool = False,
     ) -> ModelSessionPaths:
         resolved_workbook_path = Path(workbook_path).expanduser().resolve()
         resolved_output_dir = Path(output_dir).expanduser().resolve()
@@ -216,7 +215,11 @@ class ModelSessionPaths:
             source_workbook_path=resolved_workbook_path,
             output_dir=resolved_output_dir,
             session_dir=session_dir,
-            workbook_copy=session_dir / resolved_workbook_path.name,
+            workbook_copy=(
+                resolved_workbook_path
+                if use_source_workbook
+                else session_dir / resolved_workbook_path.name
+            ),
             chart_dir=chart_dir,
             metadata_path=session_dir / "session.json",
         )
@@ -260,12 +263,18 @@ class ModelWorkbookRunner:
         output_dir: str | Path = "notebook_outputs",
         *,
         visible: bool = False,
+        use_source_workbook: bool = False,
     ) -> QuestionnaireSessionState:
-        paths = ModelSessionPaths.create(workbook_path=workbook_path, output_dir=output_dir)
+        paths = ModelSessionPaths.create(
+            workbook_path=workbook_path,
+            output_dir=output_dir,
+            use_source_workbook=use_source_workbook,
+        )
         if not paths.source_workbook_path.exists():
             raise FileNotFoundError(f"Workbook not found: {paths.source_workbook_path}")
 
-        shutil.copy2(paths.source_workbook_path, paths.workbook_copy)
+        if not use_source_workbook:
+            shutil.copy2(paths.source_workbook_path, paths.workbook_copy)
 
         try:
             with xw.App(visible=visible, add_book=False) as app:
@@ -274,7 +283,7 @@ class ModelWorkbookRunner:
 
                 book = app.books.open(str(paths.workbook_copy))
                 try:
-                    self._call_macro(book, self.contract.questionnaire_macro_name)
+                    call_vba_macro(book, self.contract.questionnaire_macro_name)
                     book.app.calculate()
                     book.save()
                     questions = self._extract_questions(
@@ -283,7 +292,7 @@ class ModelWorkbookRunner:
                 finally:
                     book.close()
         except Exception as exc:
-            ExcelWorkbookRunner._log_excel_exception(exc)
+            log_excel_exception(exc)
             raise RuntimeError(
                 "Excel automation failed while starting the Model.xlsm questionnaire session. "
                 "Make sure Microsoft Excel is installed, macOS has granted automation "
@@ -296,6 +305,7 @@ class ModelWorkbookRunner:
             session_id=paths.session_id,
             source_workbook_path=str(paths.source_workbook_path),
             workbook_copy=str(paths.workbook_copy),
+            use_source_workbook=use_source_workbook,
             chart_dir=str(paths.chart_dir),
             metadata_path=str(paths.metadata_path),
             created_at=timestamp,
@@ -336,7 +346,7 @@ class ModelWorkbookRunner:
                 finally:
                     book.close()
         except Exception as exc:
-            ExcelWorkbookRunner._log_excel_exception(exc)
+            log_excel_exception(exc)
             raise RuntimeError(
                 "Excel automation failed while writing questionnaire answers. "
                 "Make sure Microsoft Excel is installed, macOS has granted automation "
@@ -380,7 +390,7 @@ class ModelWorkbookRunner:
                     calculator_sheet.range(self.contract.short_selling_cell).value = (
                         "Yes" if allow_short_selling else "No"
                     )
-                    self._call_macro(book, self.contract.calculator_macro_name)
+                    call_vba_macro(book, self.contract.calculator_macro_name)
                     book.app.calculate()
                     book.save()
 
@@ -391,7 +401,7 @@ class ModelWorkbookRunner:
                 finally:
                     book.close()
         except Exception as exc:
-            ExcelWorkbookRunner._log_excel_exception(exc)
+            log_excel_exception(exc)
             raise RuntimeError(
                 "Excel automation failed while running the MVP workflow. Make sure "
                 "Microsoft Excel is installed, macOS has granted automation access to "
@@ -447,10 +457,12 @@ class ModelWorkbookRunner:
 
     def serialize_start_payload(self, state: QuestionnaireSessionState) -> dict[str, Any]:
         return {
+            "advisor_name": ADVISOR_NAME,
             "status": state.status,
             "session_id": state.session_id,
             "source_workbook_path": state.source_workbook_path,
             "workbook_copy": state.workbook_copy,
+            "use_source_workbook": state.use_source_workbook,
             "metadata_path": state.metadata_path,
             "questions": [question.to_dict() for question in state.questions],
             "answer_submission_format": {
@@ -466,9 +478,11 @@ class ModelWorkbookRunner:
             raise ValueError("Investor profile is not available for this session yet.")
 
         return {
+            "advisor_name": ADVISOR_NAME,
             "status": state.status,
             "session_id": state.session_id,
             "workbook_copy": state.workbook_copy,
+            "use_source_workbook": state.use_source_workbook,
             "answers": dict(state.answers),
             "investor_profile": state.investor_profile,
             "creative_profile_message": self.build_profile_message(state.investor_profile),
@@ -480,9 +494,11 @@ class ModelWorkbookRunner:
             raise ValueError("Final workbook outputs are not available for this session yet.")
 
         return {
+            "advisor_name": ADVISOR_NAME,
             "status": state.status,
             "session_id": state.session_id,
             "workbook_copy": state.workbook_copy,
+            "use_source_workbook": state.use_source_workbook,
             "allow_short_selling": state.allow_short_selling,
             "investor_profile": state.investor_profile,
             "summary_range": self.contract.summary_range,
@@ -499,27 +515,29 @@ class ModelWorkbookRunner:
 
         if "conservative" in lowered_profile:
             guidance = (
-                "You are leaning toward capital preservation, steadier moves, and a calmer "
-                "risk profile."
+                "This points to a preference for capital preservation, steadier portfolio "
+                "behavior, and a lower overall risk budget."
             )
         elif "moderate" in lowered_profile or "balanced" in lowered_profile:
             guidance = (
-                "You sit in the middle ground, balancing growth with downside awareness."
+                "This suggests a balanced stance that still values growth, but with visible "
+                "attention to downside control."
             )
         elif "aggressive" in lowered_profile or "growth" in lowered_profile:
             guidance = (
-                "You are signaling a higher appetite for risk in exchange for stronger "
-                "upside potential."
+                "This indicates a stronger willingness to accept volatility in pursuit of "
+                "higher long-term return potential."
             )
         else:
             guidance = (
-                "Your workbook profile points to a distinct investment style that should guide "
-                "the optimizer."
+                "This points to a distinct investment stance that should guide the optimizer "
+                "settings and portfolio interpretation."
             )
 
         return (
-            f"Your workbook-generated investor profile is {cleaned_profile}. "
-            f"{guidance} The next step is to decide whether you want short selling enabled."
+            f"Sandra's workbook-generated assessment classifies the investor profile as "
+            f"{cleaned_profile}. {guidance} The next step is to decide whether short selling "
+            "should be enabled for the optimizer run."
         )
 
     def _save_session_state(self, state: QuestionnaireSessionState) -> None:
@@ -617,7 +635,7 @@ class ModelWorkbookRunner:
             if allow_short_selling
             else self.contract.no_short_macro_name
         )
-        self._call_macro(book, macro_name)
+        call_vba_macro(book, macro_name)
 
     def _read_summary_table(
         self,
@@ -656,7 +674,7 @@ class ModelWorkbookRunner:
         for chart_name in self.contract.chart_names:
             chart_path = paths.chart_path(chart_name)
             exporter = ExcelChartExporter(
-                WorkbookContract(
+                ExcelChartSpec(
                     sheet_name=self.contract.calculator_sheet,
                     chart_name=chart_name,
                 )
@@ -665,35 +683,6 @@ class ModelWorkbookRunner:
             exported_paths[chart_name] = str(chart_path)
 
         return exported_paths
-
-    def _call_macro(self, book: xw.Book, macro_name: str, *args: object) -> object:
-        attempts: list[str] = []
-        workbook_names = [book.name]
-        if "." in book.name:
-            workbook_names.append(book.name.rsplit(".", 1)[0])
-
-        scoped_names = [macro_name, f"Module1.{macro_name}"]
-
-        for scoped_name in scoped_names:
-            try:
-                return book.macro(scoped_name)(*args)
-            except Exception as exc:
-                attempts.append(f"{scoped_name}: {exc}")
-
-        for workbook_name in workbook_names:
-            for scoped_name in scoped_names:
-                for candidate in (
-                    f"{workbook_name}!{scoped_name}",
-                    f"'{workbook_name}'!{scoped_name}",
-                ):
-                    try:
-                        return book.app.macro(candidate)(*args)
-                    except Exception as exc:
-                        attempts.append(f"{candidate}: {exc}")
-
-        raise RuntimeError(
-            f"Unable to call VBA macro '{macro_name}'. Tried: " + " | ".join(attempts)
-        )
 
 
 def accepted_answers_from_elicitation(payload: BaseModel) -> dict[str, str]:

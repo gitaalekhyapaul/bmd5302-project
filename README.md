@@ -1,54 +1,55 @@
 # bmd5302-project
 
-Excel-driven automation workflows for `Model.xlsm` and `Test.xlsm`.
+Workbook-backed automation for [Model.xlsm](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/Model.xlsm:1).
 
-This repository keeps Excel as the source of truth. Python and the MCP server orchestrate workbook execution, write inputs into workbook-owned cells, run workbook macros, and return workbook-generated outputs such as profile text, tables, and charts.
+This repository keeps Excel as the source of truth. Python and MCP orchestrate workbook execution, write only workbook-owned inputs, run workbook macros, and return workbook-generated outputs such as investor profiles, summary tables, and charts.
 
-## Current Primary Workflow: `Model.xlsm`
+The named robo-adviser in this repo is `Sandra`. Sandra should be presented with a professional financial-adviser tone: clear, measured, and grounded in the workbook outputs rather than invented portfolio logic.
 
-The primary MCP workflow now targets [Model.xlsm](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/Model.xlsm:1).
+## Current Workflow: `Model.xlsm`
 
-This workflow is designed for an investor questionnaire followed by workbook-driven optimization:
+The active workflow is a questionnaire-driven portfolio optimization flow:
 
-1. Generate 10 randomized questions from sheet `1_Questionnaire`.
-2. Extract question text from column `D` and options from column `E`.
-3. Collect the user's answers.
-4. Write answer letters into column `F`.
+1. Run `RandomizeQuestions` on sheet `1_Questionnaire`.
+2. Read the 10 generated questions from column `D` and their options from column `E`.
+3. Collect one answer letter per question.
+4. Write the answers into column `F`.
 5. Read the workbook-generated investor profile from `G21`.
-6. Decide whether short selling should be enabled.
-7. Run the workbook-owned optimizer flow on sheet `12_Optimizer`.
-8. Set `2_MVP_Calculator!B6` to `Yes` or `No`.
-9. Run the workbook macro behind `CalcMVPButton`.
-10. Extract `A18:D28` and export both charts from sheet `2_MVP_Calculator`.
+6. Choose whether short selling should be enabled.
+7. Run `RunOptimizer` or `RunOptimizerShortSelling` on sheet `12_Optimizer`.
+8. Write `Yes` or `No` into `2_MVP_Calculator!B6`.
+9. Run `CalculateMVP`.
+10. Read `A18:D28` and export `MVP_FrontierChart` plus `OptimalWeight_Chart`.
 
-The Python code does not recreate the workbook's scoring, optimization, or chart logic in Python.
+Python does not recreate the workbook's scoring, optimization, or chart logic.
 
-## `Model.xlsm` MCP Tools
+## MCP Tools
 
 The MCP server is implemented in [mcp_server.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/mcp_server.py:1).
 
-Current `Model.xlsm` tools:
+Current tools:
 
-- `start_investor_questionnaire(workbook_path="Model.xlsm", output_dir="notebook_outputs", visible=False, use_elicitation=True)`
+- `start_investor_questionnaire(workbook_path="Model.xlsm", output_dir="notebook_outputs", visible=False, use_elicitation=True, use_source_workbook=False)`
   - creates a session-scoped workbook copy
   - runs `RandomizeQuestions`
   - returns the 10 structured questions
-  - if the MCP client supports elicitation and `use_elicitation=True`, the tool can ask for answers immediately during tool execution
+  - includes `advisor_name="Sandra"`
+  - when `use_source_workbook=True`, the session operates directly on the project-root workbook instead of a copied workbook
 - `submit_investor_questionnaire_answers(session_id, answers, output_dir="notebook_outputs", visible=False)`
   - writes validated answer letters into column `F`
   - reads `G21`
-  - returns the workbook-generated investor profile plus a user-facing profile message
+  - returns the workbook-generated profile plus Sandra's professional profile message
 - `run_investor_mvp(session_id, allow_short_selling=None, output_dir="notebook_outputs", visible=False, use_elicitation=True)`
-  - optionally elicits the short-selling choice if the client supports elicitation
+  - optionally elicits the short-selling choice
   - runs the optimizer macros
   - writes `B6`
   - runs `CalculateMVP`
   - returns `A18:D28` plus final chart paths
 - `run_investor_mvp_with_chart_images(...)`
   - same as `run_investor_mvp`
-  - additionally returns both sheet-2 charts as MCP image content blocks for compatible clients
+  - additionally returns both charts as MCP image blocks for compatible clients
 - `get_model_workbook_contract()`
-  - returns the active `Model.xlsm` contract used by the investor tools
+  - returns the active `Model.xlsm` contract used by Sandra's tools
 
 ## Elicitation Behavior
 
@@ -56,18 +57,18 @@ The `Model.xlsm` flow prefers MCP elicitation when the client declares elicitati
 
 If the client supports elicitation:
 
-- `start_investor_questionnaire` can present the 10 questionnaire prompts directly through the client
-- `run_investor_mvp` can ask the short-selling question as a final `Yes` or `No` choice
+- `start_investor_questionnaire` can present the 10 questions directly
+- `run_investor_mvp` can ask the short-selling question as a final `Yes` or `No`
 
 If the client does not support elicitation:
 
-- the tools fall back to returning structured question data
+- the tools return structured question data
 - the agent should ask the user in chat
-- the chat-collected answers should then be passed back into the corresponding tool
+- the chat-collected answers should be passed back into the follow-up tool
 
 ## Session Storage
 
-The `Model.xlsm` questionnaire flow uses disk-backed session state, not memory-only state.
+The workflow is disk-backed, not memory-only.
 
 Each session is stored under:
 
@@ -75,32 +76,26 @@ Each session is stored under:
 
 Each session directory contains:
 
-- a persistent workbook copy of `Model.xlsm`
-- `session.json` with extracted questions, answers, profile text, short-selling choice, final table output, and chart artifact paths
+- a persistent workbook copy of `Model.xlsm`, unless `use_source_workbook=True`
+- `session.json` with questions, answers, profile text, short-selling choice, final table output, and chart paths
 - chart PNGs under `charts/`
 
 Excel application objects are not kept alive across requests. Each tool call reopens the workbook copy, performs the next workbook-owned step, saves, and closes.
 
-## Legacy Workflow: `Test.xlsm`
+## Notebook Test Surface
 
-The older normal-test flow for [Test.xlsm](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/Test.xlsm:1) is still available.
+The repository includes [model_workflow.ipynb](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/model_workflow.ipynb:1) as the notebook analogue of the old test notebook.
 
-That workflow uses:
+It exercises each major workbook-backed step with variable-based knobs rather than notebook input widgets:
 
-- sheet `NormalTest`
-- input cell `B1`
-- macro `GenerateNormalData`
-- sample table `C:D`
-- chart `NormalDataChart`
+- generate and scrape the questionnaire
+- submit answer letters and read the investor profile
+- run the optimizer and export the final charts
+- reload the saved session metadata
 
-It remains exposed through the existing tools:
+The notebook defaults to `WORKBOOK_PATH = Path("Model.xlsm").resolve()` and `USE_SOURCE_WORKBOOK = True`, so it can operate directly on the project-root workbook instead of generating a new copied workbook for each run.
 
-- `run_normal_test`
-- `run_normal_test_single`
-- `run_normal_test_single_with_chart_image`
-- `get_workbook_contract`
-
-The original CLI entrypoint in [main.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/main.py:1) still targets the `Test.xlsm` normal-test workflow.
+That helps reduce repeated workbook-level trust prompts, but macOS Automation permission remains tied to the host application or Python process identity.
 
 ## Prerequisites
 
@@ -122,7 +117,6 @@ Key dependencies:
 - `xlwings`
 - `pandas`
 - `pillow`
-- `ipykernel`
 
 ## Setup
 
@@ -156,12 +150,12 @@ The default HTTP endpoint is:
 
 - `http://127.0.0.1:8000/mcp`
 
-Many MCP clients use a config like:
+A typical MCP client config is:
 
 ```json
 {
   "mcpServers": {
-    "excel-workbook": {
+    "sandra-robo-advisor": {
       "url": "http://127.0.0.1:8000/mcp"
     }
   }
@@ -170,12 +164,13 @@ Many MCP clients use a config like:
 
 ## Repo-Local Skill
 
-The repository now includes an installable skill bundle at [skills/bmd5302-robo-advisor/SKILL.md](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/skills/bmd5302-robo-advisor/SKILL.md:1).
+The repository includes an installable skill bundle at [skills/bmd5302-robo-advisor/SKILL.md](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/skills/bmd5302-robo-advisor/SKILL.md:1).
 
-It is intended for LLM frontends that support local skills and already have this repo's MCP server connected. The skill encodes:
+It is intended for LLM frontends that support local skills and already have Sandra's MCP server connected. The skill encodes:
 
 - the preferred `Model.xlsm` tool order
 - elicitation-first behavior with chat fallback
+- Sandra's professional client-facing tone
 - report-backed explanation guidance for investor profiles, risk bands, and short-selling interpretation
 
 Supporting files:
@@ -188,40 +183,17 @@ Typical installation shape:
 
 - copy or symlink `skills/bmd5302-robo-advisor/` into the frontend's skill directory, or import that folder directly if the frontend supports repo-local skills
 - keep the MCP dependency pointed at the local server started from this repo
-
-The default metadata points at the local MCP endpoint `http://127.0.0.1:8000/mcp`. If your frontend uses a different MCP URL or install path, update the skill metadata accordingly.
-
-## Running The Legacy `Test.xlsm` CLI Flow
-
-The existing command-line entrypoint still runs the `Test.xlsm` workflow.
-
-Single value:
-
-```bash
-env UV_CACHE_DIR=.uv-cache uv run bmd5302-test "24"
-```
-
-Multiple values:
-
-```bash
-env UV_CACHE_DIR=.uv-cache uv run bmd5302-test "10,25,50"
-```
-
-Visible Excel window:
-
-```bash
-env UV_CACHE_DIR=.uv-cache uv run bmd5302-test "24" --visible
-```
+- if your frontend uses a different MCP alias or URL, update [openai.yaml](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/skills/bmd5302-robo-advisor/agents/openai.yaml:1) accordingly
 
 ## Chart Export On macOS
 
-The chart export path remains workbook-owned and macOS-specific:
+The chart export path is workbook-owned and macOS-specific:
 
 - charts are accessed through `sheet.charts["<chart_name>"]`
 - `Chart.to_png()` is not reliable on macOS for this path
 - the working fallback is to bring Excel forward, activate the sheet, copy the chart as a bitmap, and save the clipboard image with `Pillow`
 
-That strategy is reused for both the legacy `Test.xlsm` chart and the two `Model.xlsm` sheet-2 charts.
+That strategy is reused for both sheet-2 charts in `Model.xlsm`.
 
 ## Code Structure
 
@@ -230,11 +202,11 @@ Relevant files:
 - [mcp_server.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/mcp_server.py:1)
   - FastMCP entrypoint and tool registration
 - [model_workflow.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/model_workflow.py:1)
-  - session-backed `Model.xlsm` workflow
-- [normal_test_workflow.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/normal_test_workflow.py:1)
-  - reusable `Test.xlsm` workflow and shared Excel export patterns
-- [main.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/main.py:1)
-  - CLI entrypoint for the legacy normal-test flow
+  - session-backed `Model.xlsm` workflow and Sandra-facing profile messaging
+- [model_workflow.ipynb](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/model_workflow.ipynb:1)
+  - notebook test surface for scraping, answer submission, optimizer execution, and chart display
+- [excel_workbook_support.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/excel_workbook_support.py:1)
+  - shared Excel chart export, macro invocation, and exception logging support
 - [PLAN.md](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/PLAN.md:1)
   - intended direction and workflow plan
 - [AGENTS.md](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/AGENTS.md:1)
@@ -251,7 +223,7 @@ Check:
 - macros are enabled for the copied workbook
 - the workbook still contains the expected sheet, macro, and chart names
 
-Both workflow modules print the original Excel or xlwings traceback before raising the higher-level runtime error.
+The automation modules print the original Excel or xlwings traceback before raising the higher-level runtime error.
 
 ### macOS permission error `-1743`
 

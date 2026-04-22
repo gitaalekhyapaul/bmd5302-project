@@ -1,7 +1,7 @@
 [project]
 name = "bmd5302-project"
 version = "0.1.0"
-description = "Excel-driven automation workflows for Model.xlsm and Test.xlsm"
+description = "Workbook-backed Sandra robo-adviser workflow for Model.xlsm"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -13,7 +13,6 @@ dependencies = [
 ]
 
 [project.scripts]
-bmd5302-test = "main:main"
 bmd5302-mcp = "mcp_server:main"
 
 [dependency-groups]
