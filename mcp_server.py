@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import time
 from typing import Any
 
 import mcp.types as mcp_types
@@ -16,16 +18,35 @@ from model_workflow import (
     accepted_answers_from_elicitation,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _configure_logging(level: int) -> None:
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        force=True,
+    )
+    logging.getLogger("mcp").setLevel(level)
+
 
 def _supports_elicitation(context: Context | None) -> bool:
     if context is None:
+        logger.debug("elicitation check: no MCP context; treating as unsupported")
         return False
 
-    return context.session.check_client_capability(
+    supported = context.session.check_client_capability(
         mcp_types.ClientCapabilities(
             elicitation=mcp_types.ElicitationCapability(),
         )
     )
+    logger.debug("elicitation check: client capability=%s", supported)
+    return supported
+
+
+def _log_tool_done(name: str, started: float, summary: str) -> None:
+    logger.info("%s completed in %.3fs — %s", name, time.perf_counter() - started, summary)
 
 
 def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
@@ -46,12 +67,27 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         context: Context | None = None,
     ) -> dict[str, Any]:
         """Start Sandra's questionnaire session and optionally elicit answers."""
+        t0 = time.perf_counter()
+        logger.info(
+            "tool start_investor_questionnaire workbook_path=%r output_dir=%r "
+            "visible=%s use_elicitation=%s use_source_workbook=%s",
+            workbook_path,
+            output_dir,
+            visible,
+            use_elicitation,
+            use_source_workbook,
+        )
         runner = ModelWorkbookRunner()
         state = runner.start_questionnaire_session(
             workbook_path=workbook_path,
             output_dir=output_dir,
             visible=visible,
             use_source_workbook=use_source_workbook,
+        )
+        logger.debug(
+            "questionnaire session started session_id=%s questions=%d",
+            state.session_id,
+            len(state.questions),
         )
         payload = runner.serialize_start_payload(state)
         payload["elicitation_supported"] = _supports_elicitation(context)
@@ -61,9 +97,21 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
                 "Collect the questionnaire answers from the user and call "
                 "`submit_investor_questionnaire_answers`."
             )
+            _log_tool_done(
+                "start_investor_questionnaire",
+                t0,
+                f"session_id={state.session_id} path=manual_answers "
+                f"elicitation_supported={payload['elicitation_supported']}",
+            )
             return payload
 
         schema = runner.build_questionnaire_elicitation_model(state.questions)
+        n_fields = len(getattr(schema, "model_fields", ()))
+        logger.info(
+            "eliciting questionnaire answers session_id=%s schema_fields=%d",
+            state.session_id,
+            n_fields,
+        )
         elicitation_result = await context.elicit(
             message=(
                 "Sandra is ready to begin the Model.xlsm investor questionnaire. "
@@ -72,11 +120,23 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             schema=schema,
         )
         payload["elicitation_action"] = elicitation_result.action
+        logger.info(
+            "questionnaire elicitation returned action=%r session_id=%s",
+            elicitation_result.action,
+            state.session_id,
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("elicitation raw data: %r", elicitation_result.data)
 
         if elicitation_result.action != "accept":
             payload["next_step"] = (
                 "Collect the questionnaire answers from the user in chat and call "
                 "`submit_investor_questionnaire_answers`."
+            )
+            _log_tool_done(
+                "start_investor_questionnaire",
+                t0,
+                f"session_id={state.session_id} elicitation_action={elicitation_result.action!r}",
             )
             return payload
 
@@ -88,6 +148,12 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         )
         payload.update(runner.serialize_profile_payload(answered_state))
         payload["input_method"] = "elicitation"
+        _log_tool_done(
+            "start_investor_questionnaire",
+            t0,
+            f"session_id={state.session_id} path=elicitation_accepted "
+            f"profile_present={'investor_profile' in payload}",
+        )
         return payload
 
     @mcp.tool()
@@ -98,6 +164,18 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         visible: bool = False,
     ) -> dict[str, Any]:
         """Write questionnaire answers into Model.xlsm and return Sandra's workbook profile."""
+        t0 = time.perf_counter()
+        logger.info(
+            "tool submit_investor_questionnaire_answers session_id=%s "
+            "answer_count=%d answer_keys=%s output_dir=%r visible=%s",
+            session_id,
+            len(answers),
+            sorted(answers.keys()),
+            output_dir,
+            visible,
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("submit_investor_questionnaire_answers answers=%r", answers)
         runner = ModelWorkbookRunner()
         state = runner.submit_answers(
             session_id=session_id,
@@ -105,22 +183,33 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             output_dir=output_dir,
             visible=visible,
         )
-        return runner.serialize_profile_payload(state)
+        out = runner.serialize_profile_payload(state)
+        _log_tool_done(
+            "submit_investor_questionnaire_answers",
+            t0,
+            f"session_id={session_id} response_keys={sorted(out.keys())}",
+        )
+        return out
 
-    @mcp.tool()
-    async def run_investor_mvp(
+    async def _run_investor_mvp_workflow(
         session_id: str,
-        allow_short_selling: bool | None = None,
-        output_dir: str = "notebook_outputs",
-        visible: bool = False,
-        use_elicitation: bool = True,
-        context: Context | None = None,
+        allow_short_selling: bool | None,
+        output_dir: str,
+        visible: bool,
+        use_elicitation: bool,
+        context: Context | None,
+        *,
+        log_tool_completion: bool,
+        started: float,
     ) -> dict[str, Any]:
-        """Run Sandra's final optimizer and MVP flow for a questionnaire session."""
         runner = ModelWorkbookRunner()
 
         if allow_short_selling is None:
             state = runner.load_session_state(session_id=session_id, output_dir=output_dir)
+            logger.debug(
+                "loaded session for short-selling branch profile_len=%s",
+                len(state.investor_profile or ""),
+            )
             payload = {
                 "advisor_name": ADVISOR_NAME,
                 "status": "short_selling_choice_required",
@@ -134,8 +223,19 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
                     "Ask the user whether they want short selling (Yes or No), then call "
                     "`run_investor_mvp` again with `allow_short_selling=true` or `false`."
                 )
+                if log_tool_completion:
+                    _log_tool_done(
+                        "run_investor_mvp",
+                        started,
+                        "status=short_selling_choice_required path=manual_short_choice "
+                        f"elicitation_supported={payload['elicitation_supported']}",
+                    )
                 return payload
 
+            logger.info(
+                "eliciting short-selling choice session_id=%s",
+                state.session_id,
+            )
             elicitation_result = await context.elicit(
                 message=(
                     "Sandra is ready to run the optimizer. "
@@ -144,22 +244,84 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
                 schema=ShortSellingChoice,
             )
             payload["elicitation_action"] = elicitation_result.action
+            logger.info(
+                "short-selling elicitation action=%r session_id=%s",
+                elicitation_result.action,
+                state.session_id,
+            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("short-selling elicitation data=%r", elicitation_result.data)
             if elicitation_result.action != "accept":
                 payload["next_step"] = (
                     "Ask the user whether they want short selling (Yes or No), then call "
                     "`run_investor_mvp` again with an explicit boolean choice."
                 )
+                if log_tool_completion:
+                    _log_tool_done(
+                        "run_investor_mvp",
+                        started,
+                        "status=short_selling_choice_required elicitation_action="
+                        f"{elicitation_result.action!r}",
+                    )
                 return payload
 
             allow_short_selling = bool(elicitation_result.data.allow_short_selling)
+            logger.info(
+                "short-selling choice from elicitation allow_short_selling=%s",
+                allow_short_selling,
+            )
 
+        logger.info(
+            "running MVP workbook steps session_id=%s allow_short_selling=%s",
+            session_id,
+            allow_short_selling,
+        )
         final_state = runner.run_mvp(
             session_id=session_id,
             allow_short_selling=allow_short_selling,
             output_dir=output_dir,
             visible=visible,
         )
-        return runner.serialize_final_payload(final_state)
+        out = runner.serialize_final_payload(final_state)
+        logger.debug("run_investor_mvp raw payload keys=%s", sorted(out.keys()))
+        if log_tool_completion:
+            _log_tool_done(
+                "run_investor_mvp",
+                started,
+                f"status={out.get('status')!r} session_id={session_id}",
+            )
+        return out
+
+    @mcp.tool()
+    async def run_investor_mvp(
+        session_id: str,
+        allow_short_selling: bool | None = None,
+        output_dir: str = "notebook_outputs",
+        visible: bool = False,
+        use_elicitation: bool = True,
+        context: Context | None = None,
+    ) -> dict[str, Any]:
+        """Run Sandra's final optimizer and MVP flow for a questionnaire session."""
+        t0 = time.perf_counter()
+        logger.info(
+            "tool run_investor_mvp session_id=%s allow_short_selling=%r "
+            "output_dir=%r visible=%s use_elicitation=%s",
+            session_id,
+            allow_short_selling,
+            output_dir,
+            visible,
+            use_elicitation,
+        )
+        return await _run_investor_mvp_workflow(
+            session_id,
+            allow_short_selling,
+            output_dir,
+            visible,
+            use_elicitation,
+            context,
+            log_tool_completion=True,
+            started=t0,
+        )
 
     @mcp.tool(structured_output=False)
     async def run_investor_mvp_with_chart_images(
@@ -171,18 +333,51 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         context: Context | None = None,
     ) -> list[dict[str, Any] | Image]:
         """Run Sandra's final Model.xlsm MVP flow and return the sheet 2 charts as MCP images."""
-        payload = await run_investor_mvp(
-            session_id=session_id,
-            allow_short_selling=allow_short_selling,
-            output_dir=output_dir,
-            visible=visible,
-            use_elicitation=use_elicitation,
-            context=context,
+        t0 = time.perf_counter()
+        logger.info(
+            "tool run_investor_mvp_with_chart_images session_id=%s allow_short_selling=%r "
+            "output_dir=%r visible=%s use_elicitation=%s",
+            session_id,
+            allow_short_selling,
+            output_dir,
+            visible,
+            use_elicitation,
+        )
+        mvp_started = time.perf_counter()
+        payload = await _run_investor_mvp_workflow(
+            session_id,
+            allow_short_selling,
+            output_dir,
+            visible,
+            use_elicitation,
+            context,
+            log_tool_completion=False,
+            started=mvp_started,
+        )
+        logger.debug(
+            "run_investor_mvp_with_chart_images MVP phase done in %.3fs",
+            time.perf_counter() - mvp_started,
         )
         if payload.get("status") != "completed":
+            _log_tool_done(
+                "run_investor_mvp_with_chart_images",
+                t0,
+                f"early_return status={payload.get('status')!r} parts=1",
+            )
             return [payload]
 
         contract = ModelWorkbookContract()
+        paths = payload["chart_paths"]
+        logger.info(
+            "attaching chart images session_id=%s charts=%s",
+            session_id,
+            [paths.get(n) for n in contract.chart_names],
+        )
+        _log_tool_done(
+            "run_investor_mvp_with_chart_images",
+            t0,
+            "status=completed parts=3 (payload + 2 images)",
+        )
         return [
             payload,
             Image(path=payload["chart_paths"][contract.chart_names[0]]),
@@ -192,8 +387,10 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
     @mcp.tool()
     def get_model_workbook_contract() -> dict[str, Any]:
         """Return the active Model.xlsm workbook contract used by Sandra's investor tools."""
+        t0 = time.perf_counter()
+        logger.info("tool get_model_workbook_contract")
         contract = ModelWorkbookContract()
-        return {
+        out = {
             "advisor_name": ADVISOR_NAME,
             "questionnaire_sheet": contract.questionnaire_sheet,
             "questionnaire_macro_name": contract.questionnaire_macro_name,
@@ -213,6 +410,12 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             "summary_range": contract.summary_range,
             "chart_names": list(contract.chart_names),
         }
+        _log_tool_done(
+            "get_model_workbook_contract",
+            t0,
+            f"chart_names={out['chart_names']}",
+        )
+        return out
 
     return mcp
 
@@ -248,11 +451,35 @@ def _build_parser() -> argparse.ArgumentParser:
         default="/mcp",
         help="HTTP path for streamable HTTP transport.",
     )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging level for this process (default INFO).",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Shorthand for --log-level DEBUG.",
+    )
     return parser
 
 
 def main() -> None:
     args = _build_parser().parse_args()
+    level = logging.DEBUG if args.verbose else getattr(logging, args.log_level)
+    _configure_logging(level)
+    logger.info(
+        "starting Sandra MCP host=%s port=%s transport=%s mount_path=%r "
+        "streamable_http_path=%s log_level=%s",
+        args.host,
+        args.port,
+        args.transport,
+        args.mount_path,
+        args.streamable_http_path,
+        logging.getLevelName(level),
+    )
     mcp = _build_server(
         host=args.host,
         port=args.port,
