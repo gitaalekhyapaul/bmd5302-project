@@ -1,0 +1,15 @@
+interface:
+  display_name: "BMD5302 Robo-Adviser"
+  short_description: "Run and explain the workbook robo-adviser"
+  default_prompt: "Use $bmd5302-robo-advisor to run the workbook-backed investor questionnaire and explain the resulting profile and portfolio recommendation."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "excel-workbook"
+      description: "Local Model.xlsm and Test.xlsm workbook MCP server"
+      transport: "streamable_http"
+      url: "http://127.0.0.1:8000/mcp"
+
+policy:
+  allow_implicit_invocation: true

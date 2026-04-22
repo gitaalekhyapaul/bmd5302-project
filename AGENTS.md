@@ -2,37 +2,56 @@
 
 ## Workbook-First Rule
 
-- Treat `Test.xlsm` as the authoritative calculation engine for this repository.
+- Treat the active workbook for the requested flow as the authoritative calculation engine for this repository.
 - Use the Excel workbook as an API for calculations, macro execution, and chart generation.
 - The Python backend and chat workflow should gather inputs, pass them into Excel, trigger workbook logic, and return workbook-generated outputs.
 - Do not reimplement workbook formulas, VBA logic, or chart-generation behavior in Python unless the user explicitly asks for a Python rewrite.
 - When there is a conflict between a Python-side approximation and workbook behavior, follow the workbook behavior.
 
+## Planning And Documentation Rule
+
+- Always follow the current implementation direction recorded in `PLAN.md` unless the user explicitly overrides it.
+- Whenever the user adds new instructions or changes existing workflow expectations, update `PLAN.md` and `README.md` in the same pass.
+- Keep `PLAN.md` and `README.md` semantically synchronized, but do not mirror them literally.
+- `PLAN.md` should capture the intended direction, pending work, and workflow design.
+- `README.md` should capture the implemented behavior, operator workflow, and user-facing usage.
+
 ## Current Workbook Contract
 
-- Source workbook: `Test.xlsm`
-- Sheet used by automation: `NormalTest`
-- Input cell written by default: `B1`
-- VBA entry point used programmatically: `GenerateNormalData`
-- Existing chart exported after generation: `NormalDataChart`
-- Generated sample table currently read on explicit request: columns `C:D`
+- Primary MCP workbook: `Model.xlsm`
+- Questionnaire sheet: `1_Questionnaire`
+- Questionnaire macro: `RandomizeQuestions`
+- Question rows: `A9:F18`
+- Question text column: `D`
+- Question options column: `E`
+- Answer write-back column: `F`
+- Investor profile cell: `G21`
+- Optimizer sheet: `12_Optimizer`
+- No-short macro: `RunOptimizer`
+- Short-selling macro: `RunOptimizerShortSelling`
+- Calculator sheet: `2_MVP_Calculator`
+- Short-selling choice cell: `B6`
+- Final calculator macro: `CalculateMVP`
+- Final summary range: `A18:D28`
+- Final chart names: `MVP_FrontierChart`, `OptimalWeight_Chart`
+- Legacy workbook flow kept for compatibility: `Test.xlsm` on `NormalTest!B1` with `GenerateNormalData`, `C:D`, and `NormalDataChart`
 
 ## Excel Automation Learnings
 
 - `xlwings` on macOS is not a headless Excel engine. It automates a real Excel application, even when `visible=False`.
 - For this repo, Excel must remain the source of truth for:
-  - writing user input into `B1`
-  - running the workbook macro
-  - generating the sample values
-  - updating the workbook-owned chart
-- The workbook macro can be invoked reliably by trying both workbook-local and module-qualified macro names, including `Module1.GenerateNormalData`.
+  - writing workbook-owned inputs back into the required cells
+  - running workbook macros
+  - reading workbook-generated tables, profile cells, and chart outputs
+  - updating workbook-owned charts
+- The workbook macro can be invoked reliably by trying both workbook-local and module-qualified macro names, including `Module1.<MacroName>`.
 - The stable workbook interaction pattern in this repo is:
-  - keep one persistent copied workbook in `notebook_outputs/workbooks/Test.xlsm`
-  - write only the requested input cell
+  - keep persistent copied workbooks under `notebook_outputs/`
+  - use session-scoped workbook copies for the `Model.xlsm` questionnaire flow
   - save the workbook after macro execution
   - read only the explicitly requested output ranges
 - Default write rule:
-  - only write `NormalTest!B1` unless the user explicitly asks for broader workbook edits
+  - only write the workbook-owned cells required by the current workflow contract unless the user explicitly asks for broader workbook edits
 - Default read rule:
   - do not read arbitrary workbook cells just to reproduce workbook behavior in Python
   - reading output ranges is allowed when the user explicitly asks to display workbook-generated results
@@ -40,7 +59,7 @@
 ## macOS-Specific Chart Extraction Learnings
 
 - `sheet.api.ChartObjects(...)` is not the right access path under xlwings' macOS backend.
-- The chart must be accessed via `sheet.charts["NormalDataChart"]`.
+- The chart must be accessed via `sheet.charts["<chart_name>"]`.
 - `Chart.to_png()` is not supported on macOS in xlwings.
 - `save_as_picture(...)` on the chart object may fail with Excel/appscript parameter errors on macOS.
 - The working export strategy for this repo is:
@@ -61,17 +80,16 @@
 
 ## Production Extension Guidance
 
-- Reuse the class-based structure in `normal_test_workflow.py` instead of adding more global helper functions.
+- Reuse class-based workbook runners instead of scattering new global helpers.
 - Current reusable extension points:
-  - `WorkbookContract` for workbook-specific cell, sheet, macro, and chart names
-  - `WorkflowPaths` for stable output locations
   - `ExcelChartExporter` for chart extraction strategy
-  - `ExcelWorkbookRunner` for orchestration and future workflow expansion
-- If the workbook contract changes later, prefer updating `WorkbookContract` or subclassing the runner/exporter instead of scattering new literals throughout the codebase.
+  - `ExcelWorkbookRunner` for the legacy `Test.xlsm` workflow
+  - `ModelWorkbookRunner` for the session-backed `Model.xlsm` workflow
+- If the workbook contract changes later, prefer updating the relevant workbook contract or runner instead of scattering new literals throughout the codebase.
 
 ## MCP Server Learnings and Rules
 
-- The MCP server entrypoint is `excel_mcp_server.py`.
+- The MCP server entrypoint is `mcp_server.py`.
 - Default transport for this repo should be HTTP (`streamable-http`) rather than `stdio`.
 - Default MCP HTTP endpoint contract:
   - host: `0.0.0.0`
@@ -81,9 +99,10 @@
   - `./mcp.sh` uses all defaults
   - positional overrides are supported in order: `PORT HOST STREAMABLE_HTTP_PATH TRANSPORT MOUNT_PATH`
 - Keep Excel as the backend engine for all MCP tools:
-  - tools must call `ExcelWorkbookRunner` and workbook macros
+  - tools must call the workbook runners and workbook macros
   - do not replicate workbook formulas or macro logic in MCP/Python code
-- The server includes an image-returning tool (`run_normal_test_single_with_chart_image`) that returns MCP image content blocks for chart rendering in compatible clients.
+- Prefer MCP elicitation when the client declares elicitation support for questionnaire or yes/no input capture.
+- The server includes image-returning tools for both the legacy chart flow and the `Model.xlsm` sheet-2 chart flow.
 - Client compatibility expectation:
   - some MCP clients render image content directly
-  - text-only clients should rely on returned chart file paths
+  - text-only clients should rely on returned chart file paths or the structured fallback payload

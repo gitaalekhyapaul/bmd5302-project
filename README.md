@@ -1,43 +1,113 @@
 # bmd5302-project
 
-Excel-driven automation workflow for `Test.xlsm`.
+Excel-driven automation workflows for `Model.xlsm` and `Test.xlsm`.
 
-This repository automates a workbook-based test where Python collects inputs, writes them into the Excel workbook, runs the workbook's own VBA macro, reads the generated output table, and exports the workbook-owned chart for display in a notebook or CLI workflow.
+This repository keeps Excel as the source of truth. Python and the MCP server orchestrate workbook execution, write inputs into workbook-owned cells, run workbook macros, and return workbook-generated outputs such as profile text, tables, and charts.
 
-## What This Test Does
+## Current Primary Workflow: `Model.xlsm`
 
-The current test is defined by the workbook contract inside `Test.xlsm`:
+The primary MCP workflow now targets [Model.xlsm](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/Model.xlsm:1).
 
-- worksheet: `NormalTest`
-- input cell: `B1`
-- macro: `GenerateNormalData`
-- generated sample table: columns `C:D`
-- generated chart: `NormalDataChart`
+This workflow is designed for an investor questionnaire followed by workbook-driven optimization:
 
-The automation does not recreate the workbook logic in Python. Excel remains the calculation engine.
+1. Generate 10 randomized questions from sheet `1_Questionnaire`.
+2. Extract question text from column `D` and options from column `E`.
+3. Collect the user's answers.
+4. Write answer letters into column `F`.
+5. Read the workbook-generated investor profile from `G21`.
+6. Decide whether short selling should be enabled.
+7. Run the workbook-owned optimizer flow on sheet `12_Optimizer`.
+8. Set `2_MVP_Calculator!B6` to `Yes` or `No`.
+9. Run the workbook macro behind `CalcMVPButton`.
+10. Extract `A18:D28` and export both charts from sheet `2_MVP_Calculator`.
 
-## How The Test Was Conducted
+The Python code does not recreate the workbook's scoring, optimization, or chart logic in Python.
 
-The implemented workflow in this repo follows this sequence:
+## `Model.xlsm` MCP Tools
 
-1. Open a persistent copy of `Test.xlsm` under `notebook_outputs/workbooks/Test.xlsm`.
-2. Write the user-provided sample count into `NormalTest!B1`.
-3. Call the workbook VBA macro `GenerateNormalData`.
-4. Save the updated workbook copy.
-5. Read the generated sample table from columns `C:D`.
-6. Export the existing Excel chart `NormalDataChart` to a PNG.
-7. Display both:
-   - the generated sample table as a pandas DataFrame
-   - the exported chart image
+The MCP server is implemented in [mcp_server.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/mcp_server.py:1).
 
-On macOS, chart export is handled by temporarily bringing Excel to the foreground, copying the chart as a bitmap, and saving the clipboard image with `Pillow`.
+Current `Model.xlsm` tools:
+
+- `start_investor_questionnaire(workbook_path="Model.xlsm", output_dir="notebook_outputs", visible=False, use_elicitation=True)`
+  - creates a session-scoped workbook copy
+  - runs `RandomizeQuestions`
+  - returns the 10 structured questions
+  - if the MCP client supports elicitation and `use_elicitation=True`, the tool can ask for answers immediately during tool execution
+- `submit_investor_questionnaire_answers(session_id, answers, output_dir="notebook_outputs", visible=False)`
+  - writes validated answer letters into column `F`
+  - reads `G21`
+  - returns the workbook-generated investor profile plus a user-facing profile message
+- `run_investor_mvp(session_id, allow_short_selling=None, output_dir="notebook_outputs", visible=False, use_elicitation=True)`
+  - optionally elicits the short-selling choice if the client supports elicitation
+  - runs the optimizer macros
+  - writes `B6`
+  - runs `CalculateMVP`
+  - returns `A18:D28` plus final chart paths
+- `run_investor_mvp_with_chart_images(...)`
+  - same as `run_investor_mvp`
+  - additionally returns both sheet-2 charts as MCP image content blocks for compatible clients
+- `get_model_workbook_contract()`
+  - returns the active `Model.xlsm` contract used by the investor tools
+
+## Elicitation Behavior
+
+The `Model.xlsm` flow prefers MCP elicitation when the client declares elicitation support during initialization.
+
+If the client supports elicitation:
+
+- `start_investor_questionnaire` can present the 10 questionnaire prompts directly through the client
+- `run_investor_mvp` can ask the short-selling question as a final `Yes` or `No` choice
+
+If the client does not support elicitation:
+
+- the tools fall back to returning structured question data
+- the agent should ask the user in chat
+- the chat-collected answers should then be passed back into the corresponding tool
+
+## Session Storage
+
+The `Model.xlsm` questionnaire flow uses disk-backed session state, not memory-only state.
+
+Each session is stored under:
+
+- `notebook_outputs/model_sessions/<session_id>/`
+
+Each session directory contains:
+
+- a persistent workbook copy of `Model.xlsm`
+- `session.json` with extracted questions, answers, profile text, short-selling choice, final table output, and chart artifact paths
+- chart PNGs under `charts/`
+
+Excel application objects are not kept alive across requests. Each tool call reopens the workbook copy, performs the next workbook-owned step, saves, and closes.
+
+## Legacy Workflow: `Test.xlsm`
+
+The older normal-test flow for [Test.xlsm](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/Test.xlsm:1) is still available.
+
+That workflow uses:
+
+- sheet `NormalTest`
+- input cell `B1`
+- macro `GenerateNormalData`
+- sample table `C:D`
+- chart `NormalDataChart`
+
+It remains exposed through the existing tools:
+
+- `run_normal_test`
+- `run_normal_test_single`
+- `run_normal_test_single_with_chart_image`
+- `get_workbook_contract`
+
+The original CLI entrypoint in [main.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/main.py:1) still targets the `Test.xlsm` normal-test workflow.
 
 ## Prerequisites
 
 ### System
 
 - macOS with Microsoft Excel installed
-- permission for Python/Terminal/Jupyter to automate Excel
+- permission for Python or the terminal host to automate Excel
 - macros enabled when the copied workbook opens
 
 ### Python
@@ -46,8 +116,9 @@ On macOS, chart export is handled by temporarily bringing Excel to the foregroun
 - `uv`
 - project dependencies installed into `.venv`
 
-Current Python dependencies:
+Key dependencies:
 
+- `mcp`
 - `xlwings`
 - `pandas`
 - `pillow`
@@ -55,110 +126,37 @@ Current Python dependencies:
 
 ## Setup
 
-Create or refresh the environment with `uv`:
+Create or refresh the environment:
 
 ```bash
 uv sync
 ```
 
-## Formatting and Linting (Ruff)
-
-Format entire repo:
+If `uv` cache permissions are noisy on this machine, use a workspace-local cache:
 
 ```bash
-uv run ruff format .
+UV_CACHE_DIR=.uv-cache uv sync
 ```
 
-Lint entire repo (errors only):
+## Running The MCP Server
+
+Start the MCP server with the packaged script:
 
 ```bash
-uv run ruff check .
+env UV_CACHE_DIR=.uv-cache uv run bmd5302-mcp --transport streamable-http
 ```
 
-If you want to launch the notebook UI directly without installing Jupyter globally:
-
-```bash
-uv run --with jupyterlab jupyter lab
-```
-
-## Running The Test In The Notebook
-
-Open [normal_test_workflow.ipynb](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/normal_test_workflow.ipynb:1) and run the cells from top to bottom.
-
-The notebook will:
-
-- reload the workflow module
-- build a reusable `ExcelWorkbookRunner`
-- parse the input sample count(s)
-- run the workbook-driven test
-- display the resulting table and chart
-
-Example input values in the notebook:
-
-- `24`
-- `10 25 50`
-- `10,25,50`
-
-## Running The Test From The CLI
-
-The placeholder CLI has been replaced with a real command-line entrypoint in [main.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/main.py:1).
-
-Example:
-
-```bash
-uv run bmd5302-test "24"
-```
-
-Multiple inputs:
-
-```bash
-uv run bmd5302-test "10,25,50"
-```
-
-Visible Excel window:
-
-```bash
-uv run bmd5302-test "24" --visible
-```
-
-## Exposing Excel As MCP Tools
-
-This repo now includes an MCP server in `excel_mcp_server.py` so AI clients can call workbook calculations as tools over HTTP.
-
-### Start the server (HTTP)
+Or use the launcher script:
 
 ```bash
 ./mcp.sh
 ```
 
-### Override default port (or other settings)
-
-```bash
-./mcp.sh 9000
-./mcp.sh 9000 127.0.0.1 /mcp streamable-http
-```
-
-### Exposed MCP tools
-
-- `run_normal_test(sample_counts, workbook_path="Test.xlsm", output_dir="notebook_outputs", visible=False)`
-  - `sample_counts` accepts the same formats as CLI input, for example: `"24"` or `"10,25,50"`
-  - writes each value to `NormalTest!B1`, runs `GenerateNormalData`, and returns table rows plus chart/workbook artifact paths
-- `run_normal_test_single(sample_count, workbook_path="Test.xlsm", output_dir="notebook_outputs", visible=False)`
-  - single-run convenience wrapper
-- `run_normal_test_single_with_chart_image(sample_count, workbook_path="Test.xlsm", output_dir="notebook_outputs", visible=False)`
-  - returns MCP image content for the generated chart (plus basic metadata)
-  - clients that support MCP `image` blocks can render the chart inline
-- `get_workbook_contract()`
-  - returns the active workbook contract (sheet, input cell, macro, table columns, chart)
-
-### HTTP endpoint
-
-By default, clients should connect to:
+The default HTTP endpoint is:
 
 - `http://127.0.0.1:8000/mcp`
-- `http://<this-machine-ip>:8000/mcp` (for other devices/agents on your network)
 
-Many clients use a URL-based MCP config similar to:
+Many MCP clients use a config like:
 
 ```json
 {
@@ -170,48 +168,79 @@ Many clients use a URL-based MCP config similar to:
 }
 ```
 
-## Outputs
+## Repo-Local Skill
 
-Generated artifacts are written under `notebook_outputs/`:
+The repository now includes an installable skill bundle at [skills/bmd5302-robo-advisor/SKILL.md](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/skills/bmd5302-robo-advisor/SKILL.md:1).
 
-- persistent workbook copy:
-  - `notebook_outputs/workbooks/Test.xlsm`
-- chart exports:
-  - `notebook_outputs/charts/Test_run_XX_b1_<value>.png`
+It is intended for LLM frontends that support local skills and already have this repo's MCP server connected. The skill encodes:
 
-The workbook copy is intentionally reused across runs to reduce repeated macOS permission prompts.
+- the preferred `Model.xlsm` tool order
+- elicitation-first behavior with chat fallback
+- report-backed explanation guidance for investor profiles, risk bands, and short-selling interpretation
+
+Supporting files:
+
+- [skills/bmd5302-robo-advisor/references/tool-contract.md](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/skills/bmd5302-robo-advisor/references/tool-contract.md:1)
+- [skills/bmd5302-robo-advisor/references/report-context.md](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/skills/bmd5302-robo-advisor/references/report-context.md:1)
+- [skills/bmd5302-robo-advisor/agents/openai.yaml](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/skills/bmd5302-robo-advisor/agents/openai.yaml:1)
+
+Typical installation shape:
+
+- copy or symlink `skills/bmd5302-robo-advisor/` into the frontend's skill directory, or import that folder directly if the frontend supports repo-local skills
+- keep the MCP dependency pointed at the local server started from this repo
+
+The default metadata points at the local MCP endpoint `http://127.0.0.1:8000/mcp`. If your frontend uses a different MCP URL or install path, update the skill metadata accordingly.
+
+## Running The Legacy `Test.xlsm` CLI Flow
+
+The existing command-line entrypoint still runs the `Test.xlsm` workflow.
+
+Single value:
+
+```bash
+env UV_CACHE_DIR=.uv-cache uv run bmd5302-test "24"
+```
+
+Multiple values:
+
+```bash
+env UV_CACHE_DIR=.uv-cache uv run bmd5302-test "10,25,50"
+```
+
+Visible Excel window:
+
+```bash
+env UV_CACHE_DIR=.uv-cache uv run bmd5302-test "24" --visible
+```
+
+## Chart Export On macOS
+
+The chart export path remains workbook-owned and macOS-specific:
+
+- charts are accessed through `sheet.charts["<chart_name>"]`
+- `Chart.to_png()` is not reliable on macOS for this path
+- the working fallback is to bring Excel forward, activate the sheet, copy the chart as a bitmap, and save the clipboard image with `Pillow`
+
+That strategy is reused for both the legacy `Test.xlsm` chart and the two `Model.xlsm` sheet-2 charts.
 
 ## Code Structure
 
-The Excel workflow has been refactored around reusable classes in [normal_test_workflow.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/normal_test_workflow.py:1):
+Relevant files:
 
-- `WorkbookContract`
-  - workbook-specific sheet, input, macro, chart, and output-range definitions
-- `WorkflowPaths`
-  - stable output directory and file path management
-- `RunResult`
-  - per-run result object returned to the notebook or CLI
-- `ExcelChartExporter`
-  - chart export strategy, including macOS-specific clipboard handling
-- `ExcelWorkbookRunner`
-  - orchestration for writing inputs, running macros, reading outputs, and collecting artifacts
-
-This structure is intended to support future production expansion without scattering workbook details across multiple files.
-
-## Operational Rules
-
-- Excel is the source of truth for calculations and chart generation.
-- Python should only write `NormalTest!B1` by default.
-- Python should only read additional workbook cells when the user explicitly asks for workbook-generated outputs to be displayed.
-- Do not port workbook logic into Python unless that rewrite is explicitly requested.
+- [mcp_server.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/mcp_server.py:1)
+  - FastMCP entrypoint and tool registration
+- [model_workflow.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/model_workflow.py:1)
+  - session-backed `Model.xlsm` workflow
+- [normal_test_workflow.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/normal_test_workflow.py:1)
+  - reusable `Test.xlsm` workflow and shared Excel export patterns
+- [main.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/main.py:1)
+  - CLI entrypoint for the legacy normal-test flow
+- [PLAN.md](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/PLAN.md:1)
+  - intended direction and workflow plan
+- [AGENTS.md](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/AGENTS.md:1)
+  - repo-specific working rules
 
 ## Troubleshooting
-
-### Notebook still looks like it is running old code
-
-- restart the kernel
-- rerun the first notebook cell
-- verify the module path printed by the notebook points to this repo
 
 ### Excel automation fails
 
@@ -220,35 +249,24 @@ Check:
 - Excel is installed and launchable
 - macOS automation permissions are granted
 - macros are enabled for the copied workbook
-- the workbook still contains:
-  - sheet `NormalTest`
-  - macro `GenerateNormalData`
-  - chart `NormalDataChart`
+- the workbook still contains the expected sheet, macro, and chart names
 
-The workflow prints the original Excel/xlwings traceback before raising the higher-level runtime error. Use that traceback for debugging backend issues.
+Both workflow modules print the original Excel or xlwings traceback before raising the higher-level runtime error.
 
-Common macOS failure:
+### macOS permission error `-1743`
 
-- OSERROR `-1743` / "The user has declined permission"
-  - Python/Terminal/Jupyter does not currently have permission to automate Excel
-  - re-enable Automation access in macOS privacy settings and retry
+That means the current Python or terminal host was denied permission to automate Excel. Re-enable Automation access in macOS privacy settings and retry.
 
-### Chart export fails on macOS
+### macOS launch error `-10661`
 
-The current implementation uses clipboard-based export because:
+That usually means the current environment could not locate or launch Microsoft Excel on macOS. Verify that Excel is installed and launchable for the current user session.
 
-- `Chart.to_png()` is unsupported on macOS
-- direct appscript `save_as_picture(...)` is unreliable on this Excel/macOS path
+### Questionnaire session not found
 
-If this fails again in the future, debug the clipboard path first before changing the workbook contract.
+Make sure you are passing the same `output_dir` used when the session was created. Session metadata is resolved from:
 
-## Future Production Expansion
+- `notebook_outputs/model_sessions/<session_id>/session.json`
 
-If this workflow grows into a more complex production path:
+### Client does not show elicitation dialogs
 
-- keep workbook-specific details in `WorkbookContract`
-- extend `ExcelWorkbookRunner` for additional inputs or output ranges
-- extend or swap `ExcelChartExporter` if chart extraction changes
-- avoid adding ad hoc one-off helpers that bypass the runner
-
-The current codebase is intentionally small, but it is now structured so the Excel automation layer can evolve without rewriting the notebook or command-line entrypoint.
+That client likely did not advertise the MCP elicitation capability. In that case, use the tool output as structured prompts, ask the user in chat, and call the follow-up tool with explicit answers.
