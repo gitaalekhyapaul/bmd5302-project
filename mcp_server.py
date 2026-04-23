@@ -292,7 +292,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             )
         return out
 
-    @mcp.tool()
+    # @mcp.tool()
     async def run_investor_mvp(
         session_id: str,
         allow_short_selling: bool | None = None,
