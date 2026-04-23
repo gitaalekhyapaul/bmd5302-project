@@ -13,6 +13,11 @@
 - Named the robo-adviser `Sandra` and aligned the repo-local skill plus MCP-facing descriptions to that persona.
 - Added a notebook test surface for the `Model.xlsm` flow with variable-based knobs instead of notebook input widgets.
 - Added a root-workbook session option so notebook or MCP runs can target the project-root workbook when reducing repeated workbook trust prompts matters more than session isolation.
+- Added explicit LLM-facing payload instructions for deterministic presentation behavior:
+  - questionnaire display order and verbatim options rendering
+  - manual question display template when elicitation is unavailable
+  - strict short-selling confirmation after answer submission (no assumption path)
+  - full final table display before chart image presentation
 
 ## Active Direction
 
@@ -48,7 +53,7 @@ Implemented with MCP elicitation as the preferred questionnaire answer path when
 If elicitation is unavailable, the fallback behavior should be:
 
 - the tool returns the 10 structured questions
-- the LLM asks the user in chat
+- the LLM follows `manual_question_display_format` when present and asks the user in chat
 - a second tool receives the user's answers
 
 The submitted answers should be validated against the number of options for each question before being written back to Excel.
@@ -69,6 +74,7 @@ The tool should:
   - a creative user-facing message derived from that profile text
 
 After this step, the user should be asked whether they want short selling, with a strict `Yes` or `No` answer.
+The submit tool payload should explicitly instruct the LLM not to assume this choice and to call a run tool only with an explicit `allow_short_selling` boolean.
 
 ### 4. Run optimization and MVP output flow
 
@@ -89,6 +95,7 @@ The tool should:
   - `MVP_FrontierChart`
   - `OptimalWeight_Chart`
 - return the final workbook-generated artifacts in a user-facing format
+- for image-capable clients, return instructions to display the full `final_summary_table` first and then both chart images
 
 ## Session State
 

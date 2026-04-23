@@ -33,12 +33,15 @@ Current tools:
   - creates a session-scoped workbook copy
   - runs `RandomizeQuestions`
   - returns the 10 structured questions
+  - returns `llm_question_display_instructions` to enforce full verbatim question/options display before collecting answers
+  - when elicitation is not supported or not accepted, also returns `manual_question_display_format` for deterministic chat rendering
   - includes `advisor_name="Sandra"`
   - when `use_source_workbook=True`, the session operates directly on the project-root workbook instead of a copied workbook
 - `submit_investor_questionnaire_answers(session_id, answers, output_dir="notebook_outputs", visible=False)`
   - writes validated answer letters into column `F`
   - reads `G21`
   - returns the workbook-generated profile plus Sandra's professional profile message
+  - returns `llm_short_selling_instruction` and a strict `next_step` telling the agent to ask the user directly and then call a run tool with explicit `allow_short_selling=true|false`
 - `run_investor_mvp(session_id, allow_short_selling=None, output_dir="notebook_outputs", visible=False, use_elicitation=True)`
   - optionally elicits the short-selling choice
   - runs the optimizer macros
@@ -47,6 +50,7 @@ Current tools:
   - returns `A18:D28` plus final chart paths
 - `run_investor_mvp_with_chart_images(...)`
   - same as `run_investor_mvp`
+  - returns `llm_presentation_instructions` directing clients to display the entire final summary table before chart images
   - additionally returns both charts as MCP image blocks for compatible clients
 - `get_model_workbook_contract()`
   - returns the active `Model.xlsm` contract used by Sandra's tools
@@ -63,8 +67,14 @@ If the client supports elicitation:
 If the client does not support elicitation:
 
 - the tools return structured question data
-- the agent should ask the user in chat
+- the agent should ask the user in chat and follow `manual_question_display_format` when provided
 - the chat-collected answers should be passed back into the follow-up tool
+- after answer submission, the agent should not infer short-selling preference; it should ask a direct `Yes/No` question and pass explicit `allow_short_selling=true|false`
+
+## Response Contract Notes
+
+- Question answer letters are case-agnostic at input and normalized before workbook write-back.
+- For chart-image responses, presentation order is explicit: full `final_summary_table` first, then chart images.
 
 ## Session Storage
 

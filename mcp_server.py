@@ -46,7 +46,9 @@ def _supports_elicitation(context: Context | None) -> bool:
 
 
 def _log_tool_done(name: str, started: float, summary: str) -> None:
-    logger.info("%s completed in %.3fs — %s", name, time.perf_counter() - started, summary)
+    logger.info(
+        "%s completed in %.3fs — %s", name, time.perf_counter() - started, summary
+    )
 
 
 def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
@@ -91,11 +93,26 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         )
         payload = runner.serialize_start_payload(state)
         payload["elicitation_supported"] = _supports_elicitation(context)
+        payload["llm_question_display_instructions"] = (
+            "Display all questions and all answer options verbatim before requesting "
+            "any answers. Do not summarize or omit options."
+        )
 
         if not use_elicitation or not payload["elicitation_supported"]:
             payload["next_step"] = (
                 "Collect the questionnaire answers from the user and call "
                 "`submit_investor_questionnaire_answers`."
+            )
+            payload["manual_question_display_format"] = (
+                "Use this format for each question:\n"
+                "Question {n} ({question_key}): {question_prompt}\n"
+                "Options:\n"
+                "- A) ...\n"
+                "- B) ...\n"
+                "- C) ...\n"
+                "- D) ...\n"
+                "Answer format: return one letter per question using the question key, "
+                "for example {'q1': 'B', 'q2': 'D'}."
             )
             _log_tool_done(
                 "start_investor_questionnaire",
@@ -132,6 +149,17 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             payload["next_step"] = (
                 "Collect the questionnaire answers from the user in chat and call "
                 "`submit_investor_questionnaire_answers`."
+            )
+            payload["manual_question_display_format"] = (
+                "Use this format for each question:\n"
+                "Question {n} ({question_key}): {question_prompt}\n"
+                "Options:\n"
+                "- A) ...\n"
+                "- B) ...\n"
+                "- C) ...\n"
+                "- D) ...\n"
+                "Answer format: return one letter per question using the question key, "
+                "for example {'q1': 'B', 'q2': 'D'}."
             )
             _log_tool_done(
                 "start_investor_questionnaire",
@@ -184,6 +212,16 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             visible=visible,
         )
         out = runner.serialize_profile_payload(state)
+        out["llm_short_selling_instruction"] = (
+            "Do NOT assume whether short selling is allowed. "
+            "Ask the user directly: 'Do you want to allow short selling? (Yes/No)' "
+            "and only proceed after the user explicitly answers."
+        )
+        out["next_step"] = (
+            "Ask the user whether they want short selling (Yes/No), then call "
+            "`run_investor_mvp` or `run_investor_mvp_with_chart_images` with explicit "
+            "`allow_short_selling=true` or `allow_short_selling=false`."
+        )
         _log_tool_done(
             "submit_investor_questionnaire_answers",
             t0,
@@ -205,7 +243,9 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         runner = ModelWorkbookRunner()
 
         if allow_short_selling is None:
-            state = runner.load_session_state(session_id=session_id, output_dir=output_dir)
+            state = runner.load_session_state(
+                session_id=session_id, output_dir=output_dir
+            )
             logger.debug(
                 "loaded session for short-selling branch profile_len=%s",
                 len(state.investor_profile or ""),
@@ -250,7 +290,9 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
                 state.session_id,
             )
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("short-selling elicitation data=%r", elicitation_result.data)
+                logger.debug(
+                    "short-selling elicitation data=%r", elicitation_result.data
+                )
             if elicitation_result.action != "accept":
                 payload["next_step"] = (
                     "Ask the user whether they want short selling (Yes or No), then call "
@@ -332,7 +374,12 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         use_elicitation: bool = True,
         context: Context | None = None,
     ) -> list[dict[str, Any] | Image]:
-        """Run Sandra's final Model.xlsm MVP flow and return the sheet 2 charts as MCP images."""
+        """Run Sandra's final Model.xlsm MVP flow and return summary + sheet 2 chart images.
+
+        LLM presentation contract:
+        1) Display the full `final_summary_table` to the user.
+        2) Then present both chart images to the user.
+        """
         t0 = time.perf_counter()
         logger.info(
             "tool run_investor_mvp_with_chart_images session_id=%s allow_short_selling=%r "
@@ -357,6 +404,10 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         logger.debug(
             "run_investor_mvp_with_chart_images MVP phase done in %.3fs",
             time.perf_counter() - mvp_started,
+        )
+        payload["llm_presentation_instructions"] = (
+            "Display the entire `final_summary_table` first. "
+            "After the table is fully shown, present the chart images."
         )
         if payload.get("status") != "completed":
             _log_tool_done(
