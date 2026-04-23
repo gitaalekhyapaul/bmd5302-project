@@ -76,6 +76,9 @@ ALLOWED_WORKBOOK_TOOLS = {
     "submit_investor_questionnaire_answers",
     "run_investor_mvp",
 }
+LOG_MAX_STRING = 400
+LOG_MAX_ITEMS = 12
+LOG_MAX_DEPTH = 4
 
 
 class SandraChatConfigurationError(RuntimeError):
@@ -88,6 +91,125 @@ class SandraKbSection:
     title: str
     content: str
     terms: frozenset[str]
+
+
+def _sanitize_for_log(
+    value: Any,
+    *,
+    depth: int = 0,
+    max_depth: int = LOG_MAX_DEPTH,
+    max_items: int = LOG_MAX_ITEMS,
+    max_string: int = LOG_MAX_STRING,
+) -> Any:
+    if depth >= max_depth:
+        return f"<{type(value).__name__}>"
+    if isinstance(value, dict):
+        items = list(value.items())
+        sanitized = {
+            str(key): _sanitize_for_log(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string=max_string,
+            )
+            for key, item in items[:max_items]
+        }
+        if len(items) > max_items:
+            sanitized["__truncated_keys__"] = len(items) - max_items
+        return sanitized
+    if isinstance(value, (list, tuple, set)):
+        items = list(value)
+        sanitized_items = [
+            _sanitize_for_log(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string=max_string,
+            )
+            for item in items[:max_items]
+        ]
+        if len(items) > max_items:
+            sanitized_items.append(f"... ({len(items) - max_items} more items)")
+        return sanitized_items
+    if isinstance(value, str):
+        compact = re.sub(r"\s+", " ", value).strip()
+        if len(compact) > max_string:
+            return f"{compact[:max_string]}... <len={len(compact)}>"
+        return compact
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def _log_payload(
+    level: int,
+    message: str,
+    payload: Any,
+    *,
+    exc_info: bool = False,
+) -> None:
+    logger.log(
+        level,
+        "%s | payload=%s",
+        message,
+        json.dumps(_sanitize_for_log(payload), default=str, sort_keys=True),
+        exc_info=exc_info,
+    )
+
+
+def _message_log_summary(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summary = []
+    for message in messages:
+        if not isinstance(message, dict):
+            summary.append({"message_type": type(message).__name__})
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            content_summary: Any = f"<content parts={len(content)}>"
+        else:
+            content_summary = _sanitize_for_log(content)
+        summary.append(
+            {
+                "role": message.get("role"),
+                "content": content_summary,
+                "tool_call_count": len(message.get("tool_calls") or []),
+                "tool_call_id": message.get("tool_call_id"),
+            }
+        )
+    return summary
+
+
+def _llm_response_summary(response: Any) -> dict[str, Any]:
+    message = _first_choice_message(response)
+    tool_calls = list(getattr(message, "tool_calls", []) or []) if message is not None else []
+    choices = getattr(response, "choices", None) or []
+    finish_reason = getattr(choices[0], "finish_reason", None) if choices else None
+    return {
+        "finish_reason": finish_reason,
+        "assistant_content": _sanitize_for_log(getattr(message, "content", None)),
+        "tool_calls": [
+            {
+                "id": getattr(tool_call, "id", None),
+                "name": getattr(getattr(tool_call, "function", None), "name", None),
+                "arguments": _sanitize_for_log(
+                    getattr(getattr(tool_call, "function", None), "arguments", None)
+                ),
+            }
+            for tool_call in tool_calls
+        ],
+    }
+
+
+def _request_log_context(request: Request) -> dict[str, Any]:
+    client = request.client
+    return {
+        "method": request.method,
+        "path": request.url.path,
+        "query": dict(request.query_params),
+        "client": None if client is None else f"{client.host}:{client.port}",
+    }
 
 
 def _utc_now_iso() -> str:
@@ -247,6 +369,11 @@ class SandraChatMemory:
                 (_utc_now_iso(), json.dumps(state, default=str), thread_id),
             )
             conn.commit()
+            _log_payload(
+                logging.DEBUG,
+                "chat_memory.update_state",
+                {"thread_id": thread_id, "updates": updates, "state": state},
+            )
             return state
 
     def append_event(
@@ -287,11 +414,25 @@ class SandraChatMemory:
                 "SELECT COUNT(*) AS count FROM chat_events WHERE thread_id = ?",
                 (thread_id,),
             ).fetchone()["count"]
-        return {
-            "thread_id": thread_id,
-            "event_count": int(event_count),
-            "database_path": str(self.db_path),
-        }
+            result = {
+                "thread_id": thread_id,
+                "event_count": int(event_count),
+                "database_path": str(self.db_path),
+            }
+            _log_payload(
+                logging.DEBUG,
+                "chat_memory.append_event",
+                {
+                    "thread_id": thread_id,
+                    "role": role,
+                    "event_type": event_type,
+                    "session_id": session_id,
+                    "content": content,
+                    "payload": payload,
+                    "result": result,
+                },
+            )
+            return result
 
     def snapshot(self, thread_id: str, limit: int = 40) -> dict[str, Any]:
         with closing(self.connect()) as conn:
@@ -330,13 +471,19 @@ class SandraChatMemory:
                 }
             )
 
-        return {
+        result = {
             "thread_id": thread_id,
             "database_path": str(self.db_path),
             "event_count": int(event_count),
             "recent_events": events,
             "state": state,
         }
+        _log_payload(
+            logging.DEBUG,
+            "chat_memory.snapshot",
+            {"thread_id": thread_id, "limit": limit, "result": result},
+        )
+        return result
 
 
 class OpenAICompatibleLLM:
@@ -417,9 +564,43 @@ class OpenAICompatibleLLM:
             kwargs["tools"] = tools
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
+        _log_payload(
+            logging.INFO,
+            "llm.chat_completion request",
+            {
+                "model": self.model,
+                "base_url": self.base_url or "OpenAI SDK default",
+                "temperature": self.temperature,
+                "tool_choice": tool_choice,
+                "tools": [
+                    str(tool.get("function", {}).get("name") or tool.get("name"))
+                    for tool in (tools or [])
+                    if isinstance(tool, dict)
+                ],
+                "messages": _message_log_summary(messages),
+            },
+        )
         try:
-            return await client.chat.completions.create(**kwargs)
+            response = await client.chat.completions.create(**kwargs)
+            _log_payload(
+                logging.INFO,
+                "llm.chat_completion response",
+                _llm_response_summary(response),
+            )
+            return response
         except APIStatusError as exc:
+            _log_payload(
+                logging.ERROR,
+                "llm.chat_completion API status error",
+                {
+                    "status_code": exc.status_code,
+                    "message": exc.message,
+                    "model": self.model,
+                    "tool_choice": tool_choice,
+                    "messages": _message_log_summary(messages),
+                },
+                exc_info=True,
+            )
             raise SandraChatConfigurationError(
                 "The configured LLM provider rejected the chat completion request "
                 f"with HTTP {exc.status_code}: {exc.message}. Check "
@@ -429,6 +610,17 @@ class OpenAICompatibleLLM:
                 "OpenAI-style chat completions/tool calling."
             ) from exc
         except APIConnectionError as exc:
+            _log_payload(
+                logging.ERROR,
+                "llm.chat_completion connection error",
+                {
+                    "model": self.model,
+                    "base_url": self.base_url or "OpenAI SDK default",
+                    "tool_choice": tool_choice,
+                    "messages": _message_log_summary(messages),
+                },
+                exc_info=True,
+            )
             raise SandraChatConfigurationError(
                 "Sandra cannot reach her language model connection right now. Check "
                 "SANDRA_OPENAI_BASE_URL, network access, and provider availability."
@@ -443,6 +635,16 @@ class OpenAICompatibleLLM:
         from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 
         client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url or None)
+        _log_payload(
+            logging.INFO,
+            "llm.stream_chat_completion_text request",
+            {
+                "model": self.model,
+                "base_url": self.base_url or "OpenAI SDK default",
+                "temperature": self.temperature,
+                "messages": _message_log_summary(messages),
+            },
+        )
         try:
             stream = await client.chat.completions.create(
                 model=self.model,
@@ -450,6 +652,8 @@ class OpenAICompatibleLLM:
                 temperature=self.temperature,
                 stream=True,
             )
+            emitted_chunks = 0
+            emitted_chars = 0
             async for chunk in stream:
                 choices = getattr(chunk, "choices", None) or []
                 if not choices:
@@ -457,14 +661,43 @@ class OpenAICompatibleLLM:
                 delta = getattr(choices[0], "delta", None)
                 text = getattr(delta, "content", None)
                 if text:
+                    emitted_chunks += 1
+                    emitted_chars += len(str(text))
                     yield str(text)
+            logger.info(
+                "llm.stream_chat_completion_text completed model=%s chunks=%d chars=%d",
+                self.model,
+                emitted_chunks,
+                emitted_chars,
+            )
         except APIStatusError as exc:
+            _log_payload(
+                logging.ERROR,
+                "llm.stream_chat_completion_text API status error",
+                {
+                    "status_code": exc.status_code,
+                    "message": exc.message,
+                    "model": self.model,
+                    "messages": _message_log_summary(messages),
+                },
+                exc_info=True,
+            )
             raise SandraChatConfigurationError(
                 "The configured LLM provider rejected the streaming chat request "
                 f"with HTTP {exc.status_code}: {exc.message}. Check "
                 "SANDRA_OPENAI_BASE_URL and SANDRA_LLM_MODEL in .env."
             ) from exc
         except APIConnectionError as exc:
+            _log_payload(
+                logging.ERROR,
+                "llm.stream_chat_completion_text connection error",
+                {
+                    "model": self.model,
+                    "base_url": self.base_url or "OpenAI SDK default",
+                    "messages": _message_log_summary(messages),
+                },
+                exc_info=True,
+            )
             raise SandraChatConfigurationError(
                 "Sandra cannot reach her language model connection for live replies. "
                 "Check SANDRA_OPENAI_BASE_URL, network access, and provider availability."
@@ -489,6 +722,7 @@ class UpstreamMcpRegistry:
             raise SandraChatConfigurationError(
                 f"Unknown upstream MCP server {server_name!r}."
             )
+        logger.debug("upstream.session open server=%s url=%s", server_name, server.url)
         async with streamable_http_client(server.url) as (read, write, _):
             async with ClientSession(
                 read,
@@ -496,14 +730,19 @@ class UpstreamMcpRegistry:
                 read_timeout_seconds=timedelta(seconds=180),
             ) as session:
                 await session.initialize()
-                yield session
+                logger.debug("upstream.session initialized server=%s", server_name)
+                try:
+                    yield session
+                finally:
+                    logger.debug("upstream.session close server=%s", server_name)
 
     async def list_tools(self, server_name: str | None = None) -> dict[str, Any]:
         resolved_name = server_name or self.default_server_name()
         try:
+            logger.info("upstream.list_tools request server=%s", resolved_name)
             async with self.session(resolved_name) as session:
                 result = await session.list_tools()
-                return {
+                payload = {
                     "server_name": resolved_name,
                     "tools": [
                         {
@@ -516,18 +755,28 @@ class UpstreamMcpRegistry:
                         if tool.name in ALLOWED_WORKBOOK_TOOLS
                     ],
                 }
+                _log_payload(logging.INFO, "upstream.list_tools response", payload)
+                return payload
         except Exception as exc:
             server = self.servers.get(resolved_name)
             url = server.url if server else resolved_name
+            _log_payload(
+                logging.ERROR,
+                "upstream.list_tools failed",
+                {"server_name": resolved_name, "url": url},
+                exc_info=True,
+            )
             raise SandraChatConfigurationError(
                 "Sandra cannot reach the workbook calculation service yet. "
                 f"Start or restart ./mcp.sh and verify SANDRA_WORKBOOK_MCP_URL points to {url}."
             ) from exc
 
     async def get_tool_schema(self, server_name: str, tool_name: str) -> dict[str, Any]:
+        logger.info("upstream.get_tool_schema request server=%s tool=%s", server_name, tool_name)
         tools = await self.list_tools(server_name)
         for tool in tools["tools"]:
             if tool["name"] == tool_name:
+                _log_payload(logging.INFO, "upstream.get_tool_schema response", tool)
                 return tool
         raise SandraChatConfigurationError(
             f"Upstream MCP server {server_name!r} does not expose {tool_name!r}."
@@ -545,18 +794,50 @@ class UpstreamMcpRegistry:
                 f"Tool {tool_name!r} is not allowed in Sandra's strict workflow."
             )
         try:
+            _log_payload(
+                logging.INFO,
+                "upstream.call_tool request",
+                {
+                    "server_name": server_name,
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                },
+            )
             async with self.session(server_name) as session:
                 result = await session.call_tool(tool_name, arguments)
                 if result.isError:
-                    return {
+                    payload = {
                         "status": "error",
                         "is_error": True,
                         "content": _content_to_text(result.content),
                     }
-                return _call_tool_result_to_payload(result)
+                    _log_payload(logging.WARNING, "upstream.call_tool error response", payload)
+                    return payload
+                payload = _call_tool_result_to_payload(result)
+                _log_payload(
+                    logging.INFO,
+                    "upstream.call_tool response",
+                    {
+                        "server_name": server_name,
+                        "tool_name": tool_name,
+                        "payload": payload,
+                    },
+                )
+                return payload
         except Exception as exc:
             server = self.servers.get(server_name)
             url = server.url if server else server_name
+            _log_payload(
+                logging.ERROR,
+                "upstream.call_tool failed",
+                {
+                    "server_name": server_name,
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                    "url": url,
+                },
+                exc_info=True,
+            )
             raise SandraChatConfigurationError(
                 "Sandra reached the workbook connection, but the calculation step did "
                 f"not complete. Verify ./mcp.sh is running and responsive at {url}, "
@@ -919,6 +1200,18 @@ class SandraChatOrchestrator:
         allow_short_selling: bool | None = None,
     ) -> dict[str, Any]:
         t0 = time.perf_counter()
+        _log_payload(
+            logging.INFO,
+            "orchestrator.turn request",
+            {
+                "thread_id": thread_id,
+                "action": action,
+                "session_id": session_id,
+                "user_message": user_message,
+                "answers": answers,
+                "allow_short_selling": allow_short_selling,
+            },
+        )
         self.memory.append_event(
             thread_id=thread_id,
             role="user",
@@ -938,12 +1231,30 @@ class SandraChatOrchestrator:
                 allow_short_selling=allow_short_selling,
             )
         except SandraChatConfigurationError as exc:
+            logger.warning(
+                "orchestrator.turn configuration_required thread_id=%s action=%s error=%s",
+                thread_id,
+                action,
+                exc,
+            )
             payload = {
                 "status": "configuration_required",
                 "assistant_message": str(exc),
                 "action": action,
                 "thread_id": thread_id,
             }
+        except Exception:
+            _log_payload(
+                logging.ERROR,
+                "orchestrator.turn unexpected error",
+                {
+                    "thread_id": thread_id,
+                    "action": action,
+                    "session_id": session_id,
+                },
+                exc_info=True,
+            )
+            raise
 
         self.memory.append_event(
             thread_id=thread_id,
@@ -954,6 +1265,7 @@ class SandraChatOrchestrator:
             payload=payload,
         )
         payload["elapsed_seconds"] = round(time.perf_counter() - t0, 3)
+        _log_payload(logging.INFO, "orchestrator.turn response", payload)
         return payload
 
     async def stream_turn(
@@ -966,6 +1278,18 @@ class SandraChatOrchestrator:
         answers: dict[str, str] | None = None,
         allow_short_selling: bool | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        _log_payload(
+            logging.INFO,
+            "orchestrator.stream_turn request",
+            {
+                "thread_id": thread_id,
+                "action": action,
+                "session_id": session_id,
+                "user_message": user_message,
+                "answers": answers,
+                "allow_short_selling": allow_short_selling,
+            },
+        )
         if action != "message":
             yield {
                 "event": "status",
@@ -1024,12 +1348,30 @@ class SandraChatOrchestrator:
                 "assistant_message": assistant_message,
             }
         except SandraChatConfigurationError as exc:
+            logger.warning(
+                "orchestrator.stream_turn configuration_required thread_id=%s action=%s error=%s",
+                thread_id,
+                action,
+                exc,
+            )
             payload = {
                 "status": "configuration_required",
                 "assistant_message": str(exc),
                 "action": action,
                 "thread_id": thread_id,
             }
+        except Exception:
+            _log_payload(
+                logging.ERROR,
+                "orchestrator.stream_turn unexpected error",
+                {
+                    "thread_id": thread_id,
+                    "action": action,
+                    "session_id": session_id,
+                },
+                exc_info=True,
+            )
+            raise
 
         self.memory.append_event(
             thread_id=thread_id,
@@ -1040,6 +1382,7 @@ class SandraChatOrchestrator:
             payload=payload,
         )
         payload["elapsed_seconds"] = round(time.perf_counter() - t0, 3)
+        _log_payload(logging.INFO, "orchestrator.stream_turn result", payload)
         yield {"event": "result", "payload": payload}
 
     @staticmethod
@@ -1062,6 +1405,13 @@ class SandraChatOrchestrator:
         answers: dict[str, str] | None,
         allow_short_selling: bool | None,
     ) -> dict[str, Any]:
+        logger.debug(
+            "orchestrator._run_strict_turn route action=%s thread_id=%s session_id=%s allow_short_selling=%r",
+            action,
+            thread_id,
+            session_id,
+            allow_short_selling,
+        )
         if action == "start_questionnaire":
             return await self._tool_backed_turn(
                 thread_id=thread_id,
@@ -1139,6 +1489,18 @@ class SandraChatOrchestrator:
     ) -> dict[str, Any]:
         self.llm.validate()
         server_name = self.registry.default_server_name()
+        _log_payload(
+            logging.INFO,
+            "orchestrator._tool_backed_turn request",
+            {
+                "thread_id": thread_id,
+                "action": action,
+                "server_name": server_name,
+                "tool_name": tool_name,
+                "forced_arguments": forced_arguments,
+                "state_updates": state_updates,
+            },
+        )
         upstream_tool = await self.registry.get_tool_schema(server_name, tool_name)
         openai_name = _openai_tool_name(server_name, tool_name)
         snapshot = self.memory.snapshot(thread_id)
@@ -1158,9 +1520,18 @@ class SandraChatOrchestrator:
         )
         message = _first_choice_message(response)
         tool_calls = list(getattr(message, "tool_calls", []) or [])
+        tool_call_path = "llm_tool_call"
         if not tool_calls:
-            raise SandraChatConfigurationError(
-                f"The LLM did not invoke required MCP tool {tool_name!r}."
+            tool_call_path = "direct_fallback"
+            _log_payload(
+                logging.WARNING,
+                "orchestrator._tool_backed_turn missing tool call; falling back to direct upstream call",
+                {
+                    "thread_id": thread_id,
+                    "action": action,
+                    "tool_name": tool_name,
+                    "response": _llm_response_summary(response),
+                },
             )
 
         tool_payload = await self.registry.call_tool(
@@ -1168,15 +1539,36 @@ class SandraChatOrchestrator:
             tool_name=tool_name,
             arguments=forced_arguments,
         )
-        messages.append(_message_to_dict(message))
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": tool_calls[0].id,
-                "content": json.dumps(tool_payload, default=str),
-            }
-        )
-        final_response = await self.llm.chat_completion(messages=messages)
+        if message is not None:
+            messages.append(_message_to_dict(message))
+        if tool_calls:
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_calls[0].id,
+                    "content": json.dumps(tool_payload, default=str),
+                }
+            )
+            final_response = await self.llm.chat_completion(messages=messages)
+        else:
+            final_response = await self.llm.chat_completion(
+                messages=
+                messages
+                + [
+                    {
+                        "role": "system",
+                        "content": (
+                            "The workbook tool was executed directly because the model did "
+                            "not emit the required tool call. Use the tool result JSON "
+                            "below to prepare the user-facing reply."
+                        ),
+                    },
+                    {
+                        "role": "system",
+                        "content": f"Tool result JSON: {json.dumps(tool_payload, default=str)}",
+                    },
+                ]
+            )
         assistant_message = _extract_assistant_text(
             final_response,
             "The workbook step completed.",
@@ -1191,6 +1583,7 @@ class SandraChatOrchestrator:
                 "upstream_server": server_name,
                 "upstream_tool": tool_name,
                 "llm_tool_name": openai_name,
+                "tool_call_path": tool_call_path,
             }
         )
         self.memory.update_state(
@@ -1202,6 +1595,7 @@ class SandraChatOrchestrator:
                 "session_id": payload.get("session_id") or state_updates.get("session_id"),
             },
         )
+        _log_payload(logging.INFO, "orchestrator._tool_backed_turn response", payload)
         return payload
 
     async def _message_only_turn(
@@ -1218,7 +1612,7 @@ class SandraChatOrchestrator:
             action=action,
         )
         response = await self.llm.chat_completion(messages=messages)
-        return {
+        payload = {
             "status": "completed",
             "thread_id": thread_id,
             "action": action,
@@ -1227,6 +1621,8 @@ class SandraChatOrchestrator:
                 "I am ready to guide you through the investment consultation.",
             ),
         }
+        _log_payload(logging.INFO, "orchestrator._message_only_turn response", payload)
+        return payload
 
     def _postprocess_questionnaire(self, payload: dict[str, Any]) -> dict[str, Any]:
         return payload | {"form_html": _render_questionnaire_form(payload)}
@@ -1267,8 +1663,20 @@ def register_sandra_chat_backend_tools(mcp: FastMCP) -> None:
         answers: dict[str, str] | None = None,
         allow_short_selling: bool | None = None,
     ) -> dict[str, Any]:
+        _log_payload(
+            logging.INFO,
+            "tool sandra_chat_turn request",
+            {
+                "thread_id": thread_id,
+                "action": action,
+                "session_id": session_id,
+                "user_message": user_message,
+                "answers": answers,
+                "allow_short_selling": allow_short_selling,
+            },
+        )
         orchestrator = SandraChatOrchestrator()
-        return await orchestrator.turn(
+        payload = await orchestrator.turn(
             thread_id=thread_id,
             user_message=user_message,
             action=action,
@@ -1276,6 +1684,8 @@ def register_sandra_chat_backend_tools(mcp: FastMCP) -> None:
             answers=answers,
             allow_short_selling=allow_short_selling,
         )
+        _log_payload(logging.INFO, "tool sandra_chat_turn response", payload)
+        return payload
 
     @mcp.tool(
         name="sandra_chat_memory_snapshot",
@@ -1287,7 +1697,13 @@ def register_sandra_chat_backend_tools(mcp: FastMCP) -> None:
         thread_id: str = "default",
         limit: int = 40,
     ) -> dict[str, Any]:
-        return SandraChatMemory().snapshot(thread_id=thread_id, limit=limit)
+        payload = SandraChatMemory().snapshot(thread_id=thread_id, limit=limit)
+        _log_payload(
+            logging.INFO,
+            "tool sandra_chat_memory_snapshot response",
+            {"thread_id": thread_id, "limit": limit, "payload": payload},
+        )
+        return payload
 
     @mcp.tool(
         name="sandra_chat_record_event",
@@ -1303,7 +1719,19 @@ def register_sandra_chat_backend_tools(mcp: FastMCP) -> None:
         session_id: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return SandraChatMemory().append_event(
+        _log_payload(
+            logging.INFO,
+            "tool sandra_chat_record_event request",
+            {
+                "thread_id": thread_id,
+                "role": role,
+                "event_type": event_type,
+                "session_id": session_id,
+                "content": content,
+                "payload": payload,
+            },
+        )
+        result = SandraChatMemory().append_event(
             thread_id=thread_id,
             role=role,
             event_type=event_type,
@@ -1311,6 +1739,8 @@ def register_sandra_chat_backend_tools(mcp: FastMCP) -> None:
             session_id=session_id,
             payload=payload,
         )
+        _log_payload(logging.INFO, "tool sandra_chat_record_event response", result)
+        return result
 
 
 def _optional_string(value: Any) -> str | None:
@@ -1338,9 +1768,25 @@ async def _request_json(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
     except json.JSONDecodeError as exc:
+        _log_payload(
+            logging.ERROR,
+            "http.request invalid json",
+            _request_log_context(request),
+            exc_info=True,
+        )
         raise ValueError("Request body must be valid JSON.") from exc
     if not isinstance(body, dict):
+        _log_payload(
+            logging.ERROR,
+            "http.request non-object json body",
+            {"request": _request_log_context(request), "body_type": type(body).__name__},
+        )
         raise ValueError("Request body must be a JSON object.")
+    _log_payload(
+        logging.INFO,
+        "http.request json",
+        {"request": _request_log_context(request), "body": body},
+    )
     return body
 
 
@@ -1356,8 +1802,20 @@ async def _run_browser_chat_turn(body: dict[str, Any]) -> dict[str, Any]:
     if not user_message:
         raise ValueError("user_message is required.")
 
+    _log_payload(
+        logging.INFO,
+        "browser_chat_turn request",
+        {
+            "thread_id": thread_id,
+            "action": action,
+            "session_id": session_id,
+            "user_message": user_message,
+            "answers": answers,
+            "allow_short_selling": allow_short_selling,
+        },
+    )
     orchestrator = SandraChatOrchestrator()
-    return await orchestrator.turn(
+    payload = await orchestrator.turn(
         thread_id=thread_id,
         user_message=user_message,
         action=action,
@@ -1365,6 +1823,8 @@ async def _run_browser_chat_turn(body: dict[str, Any]) -> dict[str, Any]:
         answers=answers,
         allow_short_selling=allow_short_selling,
     )
+    _log_payload(logging.INFO, "browser_chat_turn response", payload)
+    return payload
 
 
 def register_browser_chat_routes(mcp: FastMCP) -> None:
@@ -1403,7 +1863,13 @@ def register_browser_chat_routes(mcp: FastMCP) -> None:
             limit = max(1, min(int(raw_limit), 200))
         except ValueError:
             return _json_error("limit must be an integer.")
-        return JSONResponse(SandraChatMemory().snapshot(thread_id=thread_id, limit=limit))
+        payload = SandraChatMemory().snapshot(thread_id=thread_id, limit=limit)
+        _log_payload(
+            logging.INFO,
+            "http.response /api/memory",
+            {"request": _request_log_context(request), "payload": payload},
+        )
+        return JSONResponse(payload)
 
     @mcp.custom_route("/api/record-event", methods=["POST"], include_in_schema=False)
     async def browser_record_event(request: Request) -> JSONResponse:
@@ -1422,6 +1888,11 @@ def register_browser_chat_routes(mcp: FastMCP) -> None:
             session_id=_optional_string(body.get("session_id")),
             payload=payload,
         )
+        _log_payload(
+            logging.INFO,
+            "http.response /api/record-event",
+            {"request": _request_log_context(request), "payload": result},
+        )
         return JSONResponse(result)
 
     @mcp.custom_route("/api/chat", methods=["POST"], include_in_schema=False)
@@ -1432,8 +1903,18 @@ def register_browser_chat_routes(mcp: FastMCP) -> None:
         except ValueError as exc:
             return _json_error(str(exc))
         except Exception as exc:  # pragma: no cover - defensive HTTP boundary
-            logger.exception("browser chat turn failed")
+            _log_payload(
+                logging.ERROR,
+                "http.response /api/chat failed",
+                {"request": _request_log_context(request), "error": str(exc)},
+                exc_info=True,
+            )
             return _json_error(str(exc), status_code=500)
+        _log_payload(
+            logging.INFO,
+            "http.response /api/chat",
+            {"request": _request_log_context(request), "payload": payload},
+        )
         return JSONResponse(payload)
 
     @mcp.custom_route("/api/chat/stream", methods=["POST"], include_in_schema=False)
@@ -1467,12 +1948,32 @@ def register_browser_chat_routes(mcp: FastMCP) -> None:
                 ):
                     yield _sse_payload(str(item["event"]), item["payload"])
                 yield _sse_payload("done", {"status": "done"})
+                _log_payload(
+                    logging.INFO,
+                    "http.response /api/chat/stream completed",
+                    {
+                        "request": _request_log_context(request),
+                        "thread_id": thread_id,
+                        "action": action,
+                        "session_id": session_id,
+                    },
+                )
                 return
             except ValueError as exc:
+                _log_payload(
+                    logging.WARNING,
+                    "http.response /api/chat/stream validation error",
+                    {"request": _request_log_context(request), "error": str(exc)},
+                )
                 yield _sse_payload("error", {"status": "error", "message": str(exc)})
                 return
             except Exception as exc:  # pragma: no cover - defensive HTTP boundary
-                logger.exception("browser streaming chat turn failed")
+                _log_payload(
+                    logging.ERROR,
+                    "http.response /api/chat/stream failed",
+                    {"request": _request_log_context(request), "error": str(exc)},
+                    exc_info=True,
+                )
                 yield _sse_payload("error", {"status": "error", "message": str(exc)})
                 return
 

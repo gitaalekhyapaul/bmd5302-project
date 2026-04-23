@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import string
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -66,8 +67,12 @@ class ModelWorkbookContract:
     no_short_macro_name: str = "RunOptimizer"
     short_macro_name: str = "RunOptimizerShortSelling"
     calculator_sheet: str = "2_MVP_Calculator"
+    calculator_target_sigma_cell: str = "B5"
+    calculator_stats_range: str = "B12:B15"
     short_selling_cell: str = "B6"
     calculator_macro_name: str = "CalculateMVP"
+    calculator_variance_cell: str = "B14"
+    calculator_weight_range: str = "C19:C28"
     summary_range: str = "A18:D28"
     chart_names: tuple[str, str] = ("MVP_FrontierChart", "OptimalWeight_Chart")
 
@@ -379,11 +384,19 @@ class ModelWorkbookRunner:
                 try:
                     self._run_optimizer(book, allow_short_selling=allow_short_selling)
                     calculator_sheet = book.sheets[self.contract.calculator_sheet]
+                    # CalculateMVP's VBA uses Solver on the calculator sheet's
+                    # own model (C19:C28) and assumes that sheet context is live.
+                    # The optimizer macro leaves 12_Optimizer active, so sync and
+                    # activate the calculator sheet first to match button-driven use.
+                    book.app.calculate()
+                    calculator_sheet.activate()
+                    time.sleep(0.25)
                     calculator_sheet.range(self.contract.short_selling_cell).value = (
                         "Yes" if allow_short_selling else "No"
                     )
                     call_vba_macro(book, self.contract.calculator_macro_name)
                     book.app.calculate()
+                    self._wait_for_mvp_outputs(calculator_sheet)
                     book.save()
 
                     summary_matrix, summary_columns, summary_records = self._read_summary_table(
@@ -656,6 +669,109 @@ class ModelWorkbookRunner:
 
         dataframe = pd.DataFrame(data_rows, columns=columns)
         return normalized_matrix, columns, dataframe.to_dict(orient="records")
+
+    def _wait_for_mvp_outputs(
+        self,
+        sheet: xw.Sheet,
+        *,
+        timeout_seconds: float = 15.0,
+        poll_interval_seconds: float = 0.25,
+    ) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        previous_snapshot: tuple[Any, ...] | None = None
+        stable_snapshot_reads = 0
+        last_stats_values: Any = None
+        last_weight_values: Any = None
+        last_summary_matrix: Any = None
+
+        # Wait for the workbook-owned calculator stats, weights, and final
+        # summary output to settle before Python reads the final table.
+        while True:
+            sheet.book.app.calculate()
+
+            stats_values = sheet.range(self.contract.calculator_stats_range).options(
+                ndim=1
+            ).value
+            summary_matrix = sheet.range(self.contract.summary_range).options(ndim=2).value
+            weight_values = sheet.range(self.contract.calculator_weight_range).options(
+                ndim=1
+            ).value
+
+            snapshot = (
+                self._freeze_workbook_value(stats_values),
+                self._freeze_workbook_value(summary_matrix),
+                self._freeze_workbook_value(weight_values),
+            )
+            if snapshot == previous_snapshot:
+                stable_snapshot_reads += 1
+            else:
+                stable_snapshot_reads = 1
+                previous_snapshot = snapshot
+
+            last_stats_values = stats_values
+            last_weight_values = weight_values
+            last_summary_matrix = summary_matrix
+            if stable_snapshot_reads >= 2 and self._mvp_snapshot_ready(
+                stats_values=stats_values,
+                weight_values=weight_values,
+                summary_matrix=summary_matrix,
+            ):
+                return
+
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "Workbook outputs did not settle after CalculateMVP. "
+                    f"Stats range {self.contract.calculator_stats_range}={last_stats_values!r}, "
+                    f"weight range {self.contract.calculator_weight_range}="
+                    f"{last_weight_values!r}, summary range "
+                    f"{self.contract.summary_range}={last_summary_matrix!r}."
+                )
+
+            time.sleep(poll_interval_seconds)
+
+    @staticmethod
+    def _freeze_workbook_value(value: Any) -> Any:
+        if isinstance(value, list):
+            return tuple(ModelWorkbookRunner._freeze_workbook_value(item) for item in value)
+        if isinstance(value, tuple):
+            return tuple(ModelWorkbookRunner._freeze_workbook_value(item) for item in value)
+        if isinstance(value, float):
+            return round(value, 12)
+        return value
+
+    @staticmethod
+    def _mvp_snapshot_ready(
+        *,
+        stats_values: Any,
+        weight_values: Any,
+        summary_matrix: Any,
+    ) -> bool:
+        return (
+            ModelWorkbookRunner._numeric_sequence_ready(stats_values)
+            and ModelWorkbookRunner._numeric_sequence_ready(weight_values)
+            and ModelWorkbookRunner._summary_matrix_ready(summary_matrix)
+        )
+
+    @staticmethod
+    def _numeric_sequence_ready(values: Any) -> bool:
+        if not isinstance(values, list) or not values:
+            return False
+        return all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in values
+        )
+
+    @staticmethod
+    def _summary_matrix_ready(matrix: Any) -> bool:
+        if not isinstance(matrix, list) or len(matrix) < 2:
+            return False
+        rows = [row for row in matrix if isinstance(row, list)]
+        if len(rows) != len(matrix):
+            return False
+        header = rows[0]
+        if not header or not all(str(value).strip() for value in header):
+            return False
+        return any(any(value not in (None, "") for value in row) for row in rows[1:])
 
     def _export_final_charts(
         self,

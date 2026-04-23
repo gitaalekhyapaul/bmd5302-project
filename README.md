@@ -17,9 +17,12 @@ The active workflow is a questionnaire-driven portfolio optimization flow:
 5. Read the workbook-generated investor profile from `G21`.
 6. Choose whether short selling should be enabled.
 7. Run `RunOptimizer` or `RunOptimizerShortSelling` on sheet `12_Optimizer`.
-8. Write `Yes` or `No` into `2_MVP_Calculator!B6`.
-9. Run `CalculateMVP`.
-10. Read `A18:D28` and export `MVP_FrontierChart` plus `OptimalWeight_Chart`.
+8. Let the workbook recalculate `2_MVP_Calculator!B5`, which is linked to `12_Optimizer!B16`.
+9. Activate sheet `2_MVP_Calculator` so the calculator-side Solver model runs in the same context as the workbook button flow.
+10. Write `Yes` or `No` into `2_MVP_Calculator!B6`.
+11. Run `CalculateMVP`, which seeds and solves the calculator sheet's own weight range `C19:C28`.
+12. Wait for the workbook-owned MVP outputs to settle by checking that the calculator stats in `B12:B15`, weights in `C19:C28`, and the final summary snapshot stop changing across consecutive reads.
+13. Read `A18:D28` and export `MVP_FrontierChart` plus `OptimalWeight_Chart`.
 
 Python does not recreate the workbook's scoring, optimization, or chart logic.
 
@@ -48,9 +51,11 @@ Current tools:
   - returns `llm_short_selling_instruction` and a strict `next_step` telling the agent to ask the user directly and then call a run tool with explicit `allow_short_selling=true|false`
 - `run_investor_mvp(session_id, allow_short_selling=None, output_dir="notebook_outputs", visible=False, use_elicitation=True)`
   - optionally elicits the short-selling choice
-  - runs the optimizer macros
+  - runs the optimizer macros on `12_Optimizer`
+  - recalculates and activates `2_MVP_Calculator` so the calculator-side Solver call matches the workbook button path
   - writes `B6`
-  - runs `CalculateMVP`
+  - runs `CalculateMVP` on the calculator sheet's own `C19:C28` model
+  - waits for the workbook-owned calculator stats, weight cells, and final output snapshot to settle before reading results
   - returns `A18:D28` plus final chart paths
 - `run_investor_mvp_with_chart_images(...)`
   - same as `run_investor_mvp`
@@ -58,7 +63,7 @@ Current tools:
   - returns both charts as MCP `Image` objects in response parts 2 and 3
   - does not return `chart_paths` in the JSON payload; use `run_investor_mvp` if path-based chart handling is needed
 - `get_model_workbook_contract()`
-  - returns the active `Model.xlsm` contract used by Sandra's tools
+  - returns the active `Model.xlsm` contract used by Sandra's tools, including the calculator target sigma, stats, variance, and weight ranges used by the calculator flow
 
 The server also exposes app-only tools for the MCP App. Compatible hosts should hide these from the model and make them callable only by the UI:
 
@@ -123,11 +128,15 @@ The standalone chat server serves both browser and MCP routes:
 - `/api/record-event` records local browser UI events or notes
 - `/mcp` remains the MCP endpoint
 
+Both servers now emit structured logs for request bodies, tool arguments, tool result payloads, upstream MCP requests/responses, LLM request/response summaries, SQLite memory writes, and error boundaries. Large strings are truncated in logs to keep them readable.
+
 The chat backend does not let the LLM freely use arbitrary tools. It enforces strict workflow actions and only allows workbook MCP calls that match the current step:
 
 - `start_questionnaire` -> `start_investor_questionnaire`
 - `submit_questionnaire` -> `submit_investor_questionnaire_answers`
 - `run_mvp` -> `run_investor_mvp`
+
+If the provider fails to emit the required tool call for one of those forced actions, the chat backend now falls back to a direct upstream workbook-tool invocation and records `tool_call_path` in the payload/logs.
 
 ## Sandra Knowledge Base
 

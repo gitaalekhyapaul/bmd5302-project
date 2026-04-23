@@ -34,10 +34,79 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 APP_RESOURCE_URI = "ui://sandra-investment-chat/mcp-app.html"
 APP_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app"
 APP_DEFAULT_DB_PATH = "notebook_outputs/sandra_app_memory.sqlite3"
+LOG_MAX_STRING = 400
+LOG_MAX_ITEMS = 12
+LOG_MAX_DEPTH = 4
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sanitize_for_log(
+    value: Any,
+    *,
+    depth: int = 0,
+    max_depth: int = LOG_MAX_DEPTH,
+    max_items: int = LOG_MAX_ITEMS,
+    max_string: int = LOG_MAX_STRING,
+) -> Any:
+    if depth >= max_depth:
+        return f"<{type(value).__name__}>"
+    if isinstance(value, dict):
+        items = list(value.items())
+        sanitized = {
+            str(key): _sanitize_for_log(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string=max_string,
+            )
+            for key, item in items[:max_items]
+        }
+        if len(items) > max_items:
+            sanitized["__truncated_keys__"] = len(items) - max_items
+        return sanitized
+    if isinstance(value, (list, tuple, set)):
+        items = list(value)
+        sanitized_items = [
+            _sanitize_for_log(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string=max_string,
+            )
+            for item in items[:max_items]
+        ]
+        if len(items) > max_items:
+            sanitized_items.append(f"... ({len(items) - max_items} more items)")
+        return sanitized_items
+    if isinstance(value, str):
+        compact = re.sub(r"\s+", " ", value).strip()
+        if len(compact) > max_string:
+            return f"{compact[:max_string]}... <len={len(compact)}>"
+        return compact
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def _log_payload(
+    level: int,
+    message: str,
+    payload: Any,
+    *,
+    exc_info: bool = False,
+) -> None:
+    logger.log(
+        level,
+        "%s | payload=%s",
+        message,
+        json.dumps(_sanitize_for_log(payload), default=str, sort_keys=True),
+        exc_info=exc_info,
+    )
 
 
 def _load_dotenv_file(env_path: str | Path = PROJECT_ROOT / ".env") -> None:
@@ -144,6 +213,11 @@ def _update_app_thread_state(
             (_utc_now_iso(), json.dumps(state, default=str), thread_id),
         )
         conn.commit()
+        _log_payload(
+            logging.DEBUG,
+            "app_memory.update_state",
+            {"thread_id": thread_id, "updates": updates, "state": state},
+        )
         return state
 
 
@@ -184,11 +258,25 @@ def _append_app_memory_event(
             "SELECT COUNT(*) AS count FROM app_events WHERE thread_id = ?",
             (thread_id,),
         ).fetchone()["count"]
-    return {
+    result = {
         "thread_id": thread_id,
         "event_count": int(event_count),
         "database_path": str(_app_memory_db_path()),
     }
+    _log_payload(
+        logging.DEBUG,
+        "app_memory.append_event",
+        {
+            "thread_id": thread_id,
+            "role": role,
+            "event_type": event_type,
+            "session_id": session_id,
+            "content": content,
+            "payload": payload,
+            "result": result,
+        },
+    )
+    return result
 
 
 def _get_app_memory_snapshot(thread_id: str, limit: int = 40) -> dict[str, Any]:
@@ -228,13 +316,19 @@ def _get_app_memory_snapshot(thread_id: str, limit: int = 40) -> dict[str, Any]:
             }
         )
 
-    return {
+    result = {
         "thread_id": thread_id,
         "database_path": str(_app_memory_db_path()),
         "event_count": int(event_count),
         "recent_events": events,
         "state": state,
     }
+    _log_payload(
+        logging.DEBUG,
+        "app_memory.snapshot",
+        {"thread_id": thread_id, "limit": limit, "result": result},
+    )
+    return result
 
 
 def _app_tool_meta(visibility: list[str] | None = None) -> dict[str, Any]:
@@ -474,6 +568,11 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
     )
     def open_sandra_investment_chat(thread_id: str = "default") -> dict[str, Any]:
         """Launch the Sandra MCP App and initialize the local SQLite memory thread."""
+        _log_payload(
+            logging.INFO,
+            "tool open_sandra_investment_chat request",
+            {"thread_id": thread_id},
+        )
         memory = SandraChatMemory()
         snapshot = memory.snapshot(thread_id)
         greeting = (
@@ -486,7 +585,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             event_type="app_opened",
             content=greeting,
         )
-        return {
+        payload = {
             "advisor_name": ADVISOR_NAME,
             "thread_id": thread_id,
             "message": greeting,
@@ -496,6 +595,8 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
                 "event_count": snapshot["event_count"],
             },
         }
+        _log_payload(logging.INFO, "tool open_sandra_investment_chat response", payload)
+        return payload
 
     @mcp.tool(
         name="sandra_app_memory_snapshot",
@@ -508,7 +609,13 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         limit: int = 40,
     ) -> dict[str, Any]:
         """Return recent app events and durable state from the local SQLite memory DB."""
-        return _get_app_memory_snapshot(thread_id=thread_id, limit=limit)
+        payload = _get_app_memory_snapshot(thread_id=thread_id, limit=limit)
+        _log_payload(
+            logging.INFO,
+            "tool sandra_app_memory_snapshot response",
+            {"thread_id": thread_id, "limit": limit, "payload": payload},
+        )
+        return payload
 
     @mcp.tool(
         name="sandra_app_record_chat_event",
@@ -525,7 +632,19 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Append a UI chat event to Sandra's local SQLite memory."""
-        return _append_app_memory_event(
+        _log_payload(
+            logging.INFO,
+            "tool sandra_app_record_chat_event request",
+            {
+                "thread_id": thread_id,
+                "role": role,
+                "event_type": event_type,
+                "session_id": session_id,
+                "content": content,
+                "payload": payload,
+            },
+        )
+        result = _append_app_memory_event(
             thread_id=thread_id,
             role=role,
             event_type=event_type,
@@ -533,6 +652,8 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             session_id=session_id,
             payload=payload,
         )
+        _log_payload(logging.INFO, "tool sandra_app_record_chat_event response", result)
+        return result
 
     @mcp.tool(
         name="sandra_app_start_questionnaire_form",
@@ -558,6 +679,16 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             workbook_path,
             output_dir,
             visible,
+        )
+        _log_payload(
+            logging.INFO,
+            "tool sandra_app_start_questionnaire_form request",
+            {
+                "thread_id": thread_id,
+                "workbook_path": workbook_path,
+                "output_dir": output_dir,
+                "visible": visible,
+            },
         )
         runner = ModelWorkbookRunner()
         state = runner.start_questionnaire_session(
@@ -593,6 +724,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             t0,
             f"thread_id={thread_id} session_id={state.session_id} questions={len(state.questions)}",
         )
+        _log_payload(logging.INFO, "tool sandra_app_start_questionnaire_form response", payload)
         return payload
 
     @mcp.tool(
@@ -619,6 +751,17 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             thread_id,
             session_id,
             len(answers),
+        )
+        _log_payload(
+            logging.INFO,
+            "tool sandra_app_submit_questionnaire_form request",
+            {
+                "thread_id": thread_id,
+                "session_id": session_id,
+                "answers": answers,
+                "output_dir": output_dir,
+                "visible": visible,
+            },
         )
         runner = ModelWorkbookRunner()
         state = runner.submit_answers(
@@ -659,6 +802,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             f"thread_id={thread_id} session_id={session_id} "
             f"profile_present={bool(state.investor_profile)}",
         )
+        _log_payload(logging.INFO, "tool sandra_app_submit_questionnaire_form response", payload)
         return payload
 
     @mcp.tool(
@@ -685,13 +829,39 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             session_id,
             allow_short_selling,
         )
-        runner = ModelWorkbookRunner()
-        state = runner.run_mvp(
-            session_id=session_id,
-            allow_short_selling=allow_short_selling,
-            output_dir=output_dir,
-            visible=visible,
+        _log_payload(
+            logging.INFO,
+            "tool sandra_app_run_mvp request",
+            {
+                "thread_id": thread_id,
+                "session_id": session_id,
+                "allow_short_selling": allow_short_selling,
+                "output_dir": output_dir,
+                "visible": visible,
+            },
         )
+        runner = ModelWorkbookRunner()
+        try:
+            state = runner.run_mvp(
+                session_id=session_id,
+                allow_short_selling=allow_short_selling,
+                output_dir=output_dir,
+                visible=visible,
+            )
+        except Exception:
+            _log_payload(
+                logging.ERROR,
+                "tool sandra_app_run_mvp failed",
+                {
+                    "thread_id": thread_id,
+                    "session_id": session_id,
+                    "allow_short_selling": allow_short_selling,
+                    "output_dir": output_dir,
+                    "visible": visible,
+                },
+                exc_info=True,
+            )
+            raise
         payload = runner.serialize_final_payload(state)
         payload["thread_id"] = thread_id
         payload["chart_images"] = _chart_images_from_paths(payload.get("chart_paths", {}))
@@ -726,6 +896,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             t0,
             f"thread_id={thread_id} session_id={session_id} status={payload.get('status')!r}",
         )
+        _log_payload(logging.INFO, "tool sandra_app_run_mvp response", payload)
         return payload
 
     register_sandra_chat_backend_tools(mcp)
@@ -751,6 +922,18 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             use_elicitation,
             enforced_use_source_workbook,
             use_source_workbook,
+        )
+        _log_payload(
+            logging.INFO,
+            "tool start_investor_questionnaire request",
+            {
+                "workbook_path": workbook_path,
+                "output_dir": output_dir,
+                "visible": visible,
+                "use_elicitation": use_elicitation,
+                "use_source_workbook": enforced_use_source_workbook,
+                "requested_use_source_workbook": use_source_workbook,
+            },
         )
         runner = ModelWorkbookRunner()
         state = runner.start_questionnaire_session(
@@ -793,6 +976,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
                 f"session_id={state.session_id} path=manual_answers "
                 f"elicitation_supported={payload['elicitation_supported']}",
             )
+            _log_payload(logging.INFO, "tool start_investor_questionnaire response", payload)
             return payload
 
         schema = runner.build_questionnaire_elicitation_model(state.questions)
@@ -855,6 +1039,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             f"session_id={state.session_id} path=elicitation_accepted "
             f"profile_present={'investor_profile' in payload}",
         )
+        _log_payload(logging.INFO, "tool start_investor_questionnaire response", payload)
         return payload
 
     @mcp.tool()
@@ -874,6 +1059,16 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             sorted(answers.keys()),
             output_dir,
             visible,
+        )
+        _log_payload(
+            logging.INFO,
+            "tool submit_investor_questionnaire_answers request",
+            {
+                "session_id": session_id,
+                "answers": answers,
+                "output_dir": output_dir,
+                "visible": visible,
+            },
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("submit_investor_questionnaire_answers answers=%r", answers)
@@ -900,6 +1095,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             t0,
             f"session_id={session_id} response_keys={sorted(out.keys())}",
         )
+        _log_payload(logging.INFO, "tool submit_investor_questionnaire_answers response", out)
         return out
 
     async def _run_investor_mvp_workflow(
@@ -914,6 +1110,18 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         started: float,
     ) -> dict[str, Any]:
         runner = ModelWorkbookRunner()
+        _log_payload(
+            logging.INFO,
+            "_run_investor_mvp_workflow request",
+            {
+                "session_id": session_id,
+                "allow_short_selling": allow_short_selling,
+                "output_dir": output_dir,
+                "visible": visible,
+                "use_elicitation": use_elicitation,
+                "context_present": context is not None,
+            },
+        )
 
         if allow_short_selling is None:
             state = runner.load_session_state(
@@ -943,6 +1151,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
                         "status=short_selling_choice_required path=manual_short_choice "
                         f"elicitation_supported={payload['elicitation_supported']}",
                     )
+                _log_payload(logging.INFO, "_run_investor_mvp_workflow response", payload)
                 return payload
 
             logger.info(
@@ -978,6 +1187,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
                         "status=short_selling_choice_required elicitation_action="
                         f"{elicitation_result.action!r}",
                     )
+                _log_payload(logging.INFO, "_run_investor_mvp_workflow response", payload)
                 return payload
 
             allow_short_selling = bool(elicitation_result.data.allow_short_selling)
@@ -991,12 +1201,26 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             session_id,
             allow_short_selling,
         )
-        final_state = runner.run_mvp(
-            session_id=session_id,
-            allow_short_selling=allow_short_selling,
-            output_dir=output_dir,
-            visible=visible,
-        )
+        try:
+            final_state = runner.run_mvp(
+                session_id=session_id,
+                allow_short_selling=allow_short_selling,
+                output_dir=output_dir,
+                visible=visible,
+            )
+        except Exception:
+            _log_payload(
+                logging.ERROR,
+                "_run_investor_mvp_workflow workbook execution failed",
+                {
+                    "session_id": session_id,
+                    "allow_short_selling": allow_short_selling,
+                    "output_dir": output_dir,
+                    "visible": visible,
+                },
+                exc_info=True,
+            )
+            raise
         out = runner.serialize_final_payload(final_state)
         logger.debug("run_investor_mvp raw payload keys=%s", sorted(out.keys()))
         if log_tool_completion:
@@ -1005,6 +1229,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
                 started,
                 f"status={out.get('status')!r} session_id={session_id}",
             )
+        _log_payload(logging.INFO, "_run_investor_mvp_workflow response", out)
         return out
 
     @mcp.tool()
@@ -1027,7 +1252,18 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             visible,
             use_elicitation,
         )
-        return await _run_investor_mvp_workflow(
+        _log_payload(
+            logging.INFO,
+            "tool run_investor_mvp request",
+            {
+                "session_id": session_id,
+                "allow_short_selling": allow_short_selling,
+                "output_dir": output_dir,
+                "visible": visible,
+                "use_elicitation": use_elicitation,
+            },
+        )
+        payload = await _run_investor_mvp_workflow(
             session_id,
             allow_short_selling,
             output_dir,
@@ -1037,6 +1273,8 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             log_tool_completion=True,
             started=t0,
         )
+        _log_payload(logging.INFO, "tool run_investor_mvp response", payload)
+        return payload
 
     @mcp.tool(structured_output=False)
     async def run_investor_mvp_with_chart_images(
@@ -1065,6 +1303,17 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             visible,
             use_elicitation,
         )
+        _log_payload(
+            logging.INFO,
+            "tool run_investor_mvp_with_chart_images request",
+            {
+                "session_id": session_id,
+                "allow_short_selling": allow_short_selling,
+                "output_dir": output_dir,
+                "visible": visible,
+                "use_elicitation": use_elicitation,
+            },
+        )
         mvp_started = time.perf_counter()
         payload = await _run_investor_mvp_workflow(
             session_id,
@@ -1092,6 +1341,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
                 t0,
                 f"early_return status={payload.get('status')!r} parts=1",
             )
+            _log_payload(logging.INFO, "tool run_investor_mvp_with_chart_images response", payload)
             return [payload]
 
         contract = ModelWorkbookContract()
@@ -1111,6 +1361,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             t0,
             "status=completed parts=3 (payload + 2 images)",
         )
+        _log_payload(logging.INFO, "tool run_investor_mvp_with_chart_images response", payload)
         first_chart = paths.get(contract.chart_names[0])
         second_chart = paths.get(contract.chart_names[1])
         if not first_chart or not second_chart:
@@ -1145,8 +1396,12 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             "no_short_macro_name": contract.no_short_macro_name,
             "short_macro_name": contract.short_macro_name,
             "calculator_sheet": contract.calculator_sheet,
+            "calculator_target_sigma_cell": contract.calculator_target_sigma_cell,
+            "calculator_stats_range": contract.calculator_stats_range,
             "short_selling_cell": contract.short_selling_cell,
             "calculator_macro_name": contract.calculator_macro_name,
+            "calculator_variance_cell": contract.calculator_variance_cell,
+            "calculator_weight_range": contract.calculator_weight_range,
             "summary_range": contract.summary_range,
             "chart_names": list(contract.chart_names),
         }
@@ -1155,6 +1410,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             t0,
             f"chart_names={out['chart_names']}",
         )
+        _log_payload(logging.INFO, "tool get_model_workbook_contract response", out)
         return out
 
     return mcp

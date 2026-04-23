@@ -114,6 +114,10 @@ The tool should:
 - go to sheet `2_MVP_Calculator`
 - write `B6` as `Yes` or `No` to match the user's short-selling choice
 - run the macro behind `CalcMVPButton` (`CalculateMVP`)
+- wait for the workbook-owned MVP outputs to settle before reading results:
+  - calculator stats `B12:B15` should be numeric
+  - weight cells `C19:C28` should be numeric
+  - the final output snapshot should stop changing across consecutive reads
 - extract cells `A18:D28`
 - export both charts from sheet `2_MVP_Calculator`:
   - `MVP_FrontierChart`
@@ -144,6 +148,7 @@ The runtime split should be:
 - Browser UI calls the Sandra chat/API server over same-origin HTTP/SSE.
 - The Sandra chat/API server calls the OpenAI-compatible LLM from `.env`.
 - The chat/API server executes strict tool calls against the upstream workbook MCP registry.
+- Both servers should emit structured logs for request/response bodies, tool inputs/outputs, upstream MCP I/O, LLM I/O summaries, SQLite memory writes, and error boundaries.
 - The workbook MCP server uses `Model.xlsm` as the source of truth.
 - UI-capable MCP clients can still load the MCP App resource instead of the browser route.
 
@@ -154,6 +159,7 @@ The app flow should be:
 - browser UI streams turns through `/api/chat/stream`
 - MCP App UI calls `sandra_chat_turn` with a strict action such as `start_questionnaire`
 - the chat backend calls the OpenAI-compatible API and forces the matching upstream MCP tool call
+- if the provider does not emit the required tool call for a forced action, the chat backend should fall back to a direct upstream workbook-tool execution and log that fallback path
 - the upstream MCP registry defaults to the workbook server at `SANDRA_WORKBOOK_MCP_URL`
 - the workbook MCP server starts the questionnaire with `use_source_workbook=True`
 - the chat backend renders the questionnaire form HTML from workbook-generated questions
