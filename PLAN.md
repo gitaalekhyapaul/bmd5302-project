@@ -12,7 +12,7 @@
 - Kept structured fallback paths for clients that do not support elicitation.
 - Named the robo-adviser `Sandra` and aligned the repo-local skill plus MCP-facing descriptions to that persona.
 - Added a notebook test surface for the `Model.xlsm` flow with variable-based knobs instead of notebook input widgets.
-- Added a root-workbook session option so notebook or MCP runs can target the project-root workbook when reducing repeated workbook trust prompts matters more than session isolation.
+- Enforced source-workbook mode for questionnaire sessions; workbook copying is no longer used.
 - Added explicit LLM-facing payload instructions for deterministic presentation behavior:
   - questionnaire display order and verbatim options rendering
   - manual question display template when elicitation is unavailable
@@ -33,7 +33,7 @@ Implemented via the first MCP tool that starts an investor questionnaire session
 
 The tool should:
 
-- create a persistent session-scoped workbook copy
+- use the source workbook path directly for the session workflow
 - open sheet `1_Questionnaire`
 - run the macro behind `GenRandQButton` (`RandomizeQuestions`)
 - read rows `A9:E18`
@@ -64,7 +64,7 @@ Implemented through a second MCP tool that accepts the questionnaire answers for
 
 The tool should:
 
-- reopen the same session workbook copy
+- reopen the source workbook path
 - write the selected answer letter for each question into column `F` for rows `9:18`
 - save the workbook
 - read investor profile text from `G21`
@@ -82,7 +82,7 @@ Implemented through a third MCP tool that accepts `session_id` plus a short-sell
 
 The tool should:
 
-- reopen the same session workbook copy
+- reopen the source workbook path
 - go to sheet `12_Optimizer`
 - run:
   - `RunOptimizer` for no short selling
@@ -105,7 +105,7 @@ Each questionnaire run should get its own session directory under `notebook_outp
 
 Each session directory should contain:
 
-- a persistent workbook copy of `Model.xlsm`, unless the run explicitly opts into using the project-root workbook
+- source workbook path reference plus session metadata under `notebook_outputs/model_sessions/<session_id>/`
 - a small `session.json` file with durable metadata
 
 The session metadata should include:
@@ -114,8 +114,8 @@ The session metadata should include:
 - `created_at`
 - `updated_at`
 - `advisor_name`
-- `use_source_workbook`
-- workbook copy path
+- `use_source_workbook` (always true in current implementation)
+- source workbook path
 - question metadata extracted from rows `9:18`
 - normalized option lists
 - validated answers written to column `F`
@@ -125,7 +125,7 @@ The session metadata should include:
 - extracted `A18:D28` table data
 - current session status
 
-Excel application objects should not be stored across requests. Each tool call should reopen the workbook copy, perform the next workbook-owned step, save, and close.
+Excel application objects should not be stored across requests. Each tool call should reopen the source workbook path, perform the next workbook-owned step, save, and close.
 
 ## Implementation Shape
 

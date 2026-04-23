@@ -29,14 +29,14 @@ The MCP server is implemented in [mcp_server.py](/Users/gitaalekhyapaul/Document
 
 Current tools:
 
-- `start_investor_questionnaire(workbook_path="Model.xlsm", output_dir="notebook_outputs", visible=False, use_elicitation=True, use_source_workbook=False)`
-  - creates a session-scoped workbook copy
+- `start_investor_questionnaire(workbook_path="Model.xlsm", output_dir="notebook_outputs", visible=False, use_elicitation=True, use_source_workbook=True)`
+  - always operates on the source workbook path directly (no per-session workbook copy)
   - runs `RandomizeQuestions`
   - returns the 10 structured questions
   - returns `llm_question_display_instructions` to enforce full verbatim question/options display before collecting answers
   - when elicitation is not supported or not accepted, also returns `manual_question_display_format` for deterministic chat rendering
   - includes `advisor_name="Sandra"`
-  - when `use_source_workbook=True`, the session operates directly on the project-root workbook instead of a copied workbook
+  - `use_source_workbook` is retained for compatibility but source-workbook mode is always enforced
 - `submit_investor_questionnaire_answers(session_id, answers, output_dir="notebook_outputs", visible=False)`
   - writes validated answer letters into column `F`
   - reads `G21`
@@ -51,7 +51,8 @@ Current tools:
 - `run_investor_mvp_with_chart_images(...)`
   - same as `run_investor_mvp`
   - returns `llm_presentation_instructions` directing clients to display the entire final summary table before chart images
-  - additionally returns both charts as MCP image blocks for compatible clients
+  - returns both charts as MCP `Image` objects in response parts 2 and 3
+  - does not return `chart_paths` in the JSON payload; use `run_investor_mvp` if path-based chart handling is needed
 - `get_model_workbook_contract()`
   - returns the active `Model.xlsm` contract used by Sandra's tools
 
@@ -86,11 +87,11 @@ Each session is stored under:
 
 Each session directory contains:
 
-- a persistent workbook copy of `Model.xlsm`, unless `use_source_workbook=True`
+- session metadata and exported chart artifacts
 - `session.json` with questions, answers, profile text, short-selling choice, final table output, and chart paths
 - chart PNGs under `charts/`
 
-Excel application objects are not kept alive across requests. Each tool call reopens the workbook copy, performs the next workbook-owned step, saves, and closes.
+Excel application objects are not kept alive across requests. Each tool call reopens the source workbook path, performs the next workbook-owned step, saves, and closes.
 
 ## Notebook Test Surface
 
@@ -113,7 +114,7 @@ That helps reduce repeated workbook-level trust prompts, but macOS Automation pe
 
 - macOS with Microsoft Excel installed
 - permission for Python or the terminal host to automate Excel
-- macros enabled when the copied workbook opens
+- macros enabled when the workbook opens
 
 ### Python
 
@@ -230,7 +231,7 @@ Check:
 
 - Excel is installed and launchable
 - macOS automation permissions are granted
-- macros are enabled for the copied workbook
+- macros are enabled for the workbook
 - the workbook still contains the expected sheet, macro, and chart names
 
 The automation modules print the original Excel or xlwings traceback before raising the higher-level runtime error.

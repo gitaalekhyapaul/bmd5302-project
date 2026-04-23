@@ -65,18 +65,20 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         output_dir: str = "notebook_outputs",
         visible: bool = False,
         use_elicitation: bool = True,
-        use_source_workbook: bool = False,
+        use_source_workbook: bool = True,
         context: Context | None = None,
     ) -> dict[str, Any]:
         """Start Sandra's questionnaire session and optionally elicit answers."""
         t0 = time.perf_counter()
+        enforced_use_source_workbook = True
         logger.info(
             "tool start_investor_questionnaire workbook_path=%r output_dir=%r "
-            "visible=%s use_elicitation=%s use_source_workbook=%s",
+            "visible=%s use_elicitation=%s use_source_workbook=%s (requested=%s)",
             workbook_path,
             output_dir,
             visible,
             use_elicitation,
+            enforced_use_source_workbook,
             use_source_workbook,
         )
         runner = ModelWorkbookRunner()
@@ -84,7 +86,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             workbook_path=workbook_path,
             output_dir=output_dir,
             visible=visible,
-            use_source_workbook=use_source_workbook,
+            use_source_workbook=enforced_use_source_workbook,
         )
         logger.debug(
             "questionnaire session started session_id=%s questions=%d",
@@ -379,6 +381,8 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         LLM presentation contract:
         1) Display the full `final_summary_table` to the user.
         2) Then present both chart images to the user.
+        3) Charts are returned as MCP `Image` objects in response parts 2 and 3,
+           not as file paths inside the JSON payload.
         """
         t0 = time.perf_counter()
         logger.info(
@@ -407,7 +411,9 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         )
         payload["llm_presentation_instructions"] = (
             "Display the entire `final_summary_table` first. "
-            "After the table is fully shown, present the chart images."
+            "After the table is fully shown, present the chart images. "
+            "Important: chart images are MCP Image objects in this tool response "
+            "(parts 2 and 3), not JSON file paths."
         )
         if payload.get("status") != "completed":
             _log_tool_done(
@@ -418,21 +424,33 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             return [payload]
 
         contract = ModelWorkbookContract()
-        paths = payload["chart_paths"]
+        paths = payload.get("chart_paths", {})
         logger.info(
             "attaching chart images session_id=%s charts=%s",
             session_id,
             [paths.get(n) for n in contract.chart_names],
         )
+        payload.pop("chart_paths", None)
+        payload["chart_transport"] = (
+            "Images are attached as MCP Image objects in response parts 2 and 3."
+        )
+        payload["chart_names"] = list(contract.chart_names)
         _log_tool_done(
             "run_investor_mvp_with_chart_images",
             t0,
             "status=completed parts=3 (payload + 2 images)",
         )
+        first_chart = paths.get(contract.chart_names[0])
+        second_chart = paths.get(contract.chart_names[1])
+        if not first_chart or not second_chart:
+            raise RuntimeError(
+                "Expected chart paths were not produced by the workbook run for "
+                f"{contract.chart_names[0]!r} and {contract.chart_names[1]!r}."
+            )
         return [
             payload,
-            Image(path=payload["chart_paths"][contract.chart_names[0]]),
-            Image(path=payload["chart_paths"][contract.chart_names[1]]),
+            Image(path=first_chart),
+            Image(path=second_chart),
         ]
 
     @mcp.tool()

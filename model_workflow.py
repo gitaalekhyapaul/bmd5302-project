@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
-import shutil
 import string
 from typing import Any
 from uuid import uuid4
@@ -198,7 +197,7 @@ class ModelSessionPaths:
         workbook_path: str | Path = "Model.xlsm",
         output_dir: str | Path = "notebook_outputs",
         session_id: str | None = None,
-        use_source_workbook: bool = False,
+        use_source_workbook: bool = True,
     ) -> ModelSessionPaths:
         resolved_workbook_path = Path(workbook_path).expanduser().resolve()
         resolved_output_dir = Path(output_dir).expanduser().resolve()
@@ -215,11 +214,7 @@ class ModelSessionPaths:
             source_workbook_path=resolved_workbook_path,
             output_dir=resolved_output_dir,
             session_dir=session_dir,
-            workbook_copy=(
-                resolved_workbook_path
-                if use_source_workbook
-                else session_dir / resolved_workbook_path.name
-            ),
+            workbook_copy=resolved_workbook_path,
             chart_dir=chart_dir,
             metadata_path=session_dir / "session.json",
         )
@@ -263,18 +258,15 @@ class ModelWorkbookRunner:
         output_dir: str | Path = "notebook_outputs",
         *,
         visible: bool = False,
-        use_source_workbook: bool = False,
+        use_source_workbook: bool = True,
     ) -> QuestionnaireSessionState:
         paths = ModelSessionPaths.create(
             workbook_path=workbook_path,
             output_dir=output_dir,
-            use_source_workbook=use_source_workbook,
+            use_source_workbook=True,
         )
         if not paths.source_workbook_path.exists():
             raise FileNotFoundError(f"Workbook not found: {paths.source_workbook_path}")
-
-        if not use_source_workbook:
-            shutil.copy2(paths.source_workbook_path, paths.workbook_copy)
 
         try:
             with xw.App(visible=visible, add_book=False) as app:
@@ -297,7 +289,7 @@ class ModelWorkbookRunner:
                 "Excel automation failed while starting the Model.xlsm questionnaire session. "
                 "Make sure Microsoft Excel is installed, macOS has granted automation "
                 "access to the current Python or terminal host, and macros are enabled "
-                "when the copied workbook opens."
+                "when the workbook opens."
             ) from exc
 
         timestamp = _utc_now_iso()
@@ -305,7 +297,7 @@ class ModelWorkbookRunner:
             session_id=paths.session_id,
             source_workbook_path=str(paths.source_workbook_path),
             workbook_copy=str(paths.workbook_copy),
-            use_source_workbook=use_source_workbook,
+            use_source_workbook=True,
             chart_dir=str(paths.chart_dir),
             metadata_path=str(paths.metadata_path),
             created_at=timestamp,
