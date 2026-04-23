@@ -170,8 +170,8 @@ The app flow should be:
 - if the provider does not emit the required tool call for a forced action, the chat backend should fall back to a direct upstream workbook-tool execution and log that fallback path
 - deterministic workflow steps that already have complete structured workbook payloads, such as questionnaire creation and profile submission, should not wait on an extra post-tool LLM pass before returning to the browser
 - during `run_mvp`, the main workbook server should persist session-scoped progress state and the chat backend should forward each new progress milestone as a browser SSE `status` event while the upstream tool call is still running
-- freeform `message` turns should remain chat-only by default, but if the saved thread state is already `completed` and the user asks to see tables, charts, or prior results, the backend should auto-route that message into a saved-output replay path for the latest completed session
-- if the thread is at the `profile` or `completed` stage and the user explicitly asks to rerun with or without short selling, the backend should upgrade that freeform message into a real `run_investor_mvp` call with the parsed short-selling choice
+- freeform `message` turns should remain chat-first by default, but once the saved thread state reaches a session-backed stage such as `profile` or `completed`, the backend should expose only a small set of session-safe local actions to the LLM and let the model decide whether to answer normally, replay the latest saved workbook outputs, or rerun `run_investor_mvp`
+- message intent routing should avoid hardcoded keyword classifiers; the only hard bounds should be the current workflow stage, available local action definitions, and explicit tool schemas such as the required boolean short-selling flag for an MVP rerun
 - the upstream MCP registry defaults to the workbook server at `SANDRA_WORKBOOK_MCP_URL`
 - the workbook MCP server starts the questionnaire with `use_source_workbook=True`
 - the chat backend renders the questionnaire form HTML from workbook-generated questions
