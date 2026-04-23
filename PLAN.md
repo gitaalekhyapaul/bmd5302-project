@@ -18,12 +18,29 @@
   - manual question display template when elicitation is unavailable
   - strict short-selling confirmation after answer submission (no assumption path)
   - full final table display before chart image presentation
+- Added a Sandra MCP App direction for an easy form-based investment chat UI:
+  - the Python MCP server serves the app HTML resource
+  - the app uses Tailwind theme tokens for easier visual changes
+  - an OpenAI-compatible LLM backend invokes workbook MCP tools through an upstream MCP registry
+  - strict workflow rules decide which workbook MCP tool may be called at each step
+  - local chat memory persists to SQLite, with the database path configured from `.env`
+- Added a standalone browser chat surface on the Sandra chat server:
+  - `http://127.0.0.1:8001/app` serves the same Sandra UI for normal browser use
+  - `/api/chat`, `/api/chat/stream`, `/api/memory`, and `/api/record-event` expose same-origin browser APIs
+  - the browser API reuses the same LLM-backed orchestrator that invokes the workbook MCP server
+  - browser chat replies stream `status`, `token`, `result`, and `done` server-sent events
+  - chat bubbles render sanitized Markdown
+  - in-flight Sandra bubbles show an animated loader and muted mini-log tape, then completed workflow logs collapse into a compact expandable status chip
 
 ## Active Direction
 
 The repository should expose one workbook-backed robo-adviser workflow centered on `Model.xlsm`.
 
 The implementation should keep Excel as the source of truth and use the workbook's own sheets, buttons, macros, cells, and charts as the workflow API. Python and the MCP server should orchestrate workbook execution, persist session state, and format workbook-generated outputs for the user. Sandra is the user-facing adviser identity for this workflow and should speak in a professional financial-adviser tone while staying grounded in workbook outputs.
+
+The browser and MCP App UI should make the workflow easier to use without changing the calculation path. The app should feel like a professional stock-investment chat application: restrained, client-facing, and personalized to Sandra. It should greet the user on page load and require an explicit Start action before opening Excel or beginning the questionnaire.
+
+Backward compatibility is mandatory: `mcp_server.py` must keep the existing normal MCP tools working for non-UI clients. UI/app support can be additive, but it must not remove or weaken the original `Model.xlsm` MCP tool contract.
 
 ## Target Flow
 
@@ -97,11 +114,72 @@ The tool should:
 - return the final workbook-generated artifacts in a user-facing format
 - for image-capable clients, return instructions to display the full `final_summary_table` first and then both chart images
 
+## Browser And MCP App UI Direction
+
+The workbook server should expose a MCP App launcher tool linked to a UI resource while keeping normal workbook tools available:
+
+- launcher tool: `open_sandra_investment_chat`
+- UI resource: `ui://sandra-investment-chat/mcp-app.html`
+- UI source: `mcp_app/`
+- built single-file resource: `mcp_app/dist/mcp-app.html`
+
+The LLM-backed chat server also runs as the browser chat/API server:
+
+- entrypoint: `sandra_chat_server.py`
+- script: `sandra-chat-mcp`
+- launcher: `sandra_chat_mcp.sh`
+- browser UI: `http://127.0.0.1:8001/app`
+- browser APIs: `/api/chat`, `/api/chat/stream`, `/api/memory`, `/api/record-event`
+- MCP endpoint: `http://127.0.0.1:8001/mcp`
+
+The runtime split should be:
+
+- Browser UI calls the Sandra chat/API server over same-origin HTTP/SSE.
+- The Sandra chat/API server calls the OpenAI-compatible LLM from `.env`.
+- The chat/API server executes strict tool calls against the upstream workbook MCP registry.
+- The workbook MCP server uses `Model.xlsm` as the source of truth.
+- UI-capable MCP clients can still load the MCP App resource instead of the browser route.
+
+The app flow should be:
+
+- page-load greeting from Sandra
+- explicit "Start the consultation" button
+- browser UI streams turns through `/api/chat/stream`
+- MCP App UI calls `sandra_chat_turn` with a strict action such as `start_questionnaire`
+- the chat backend calls the OpenAI-compatible API and forces the matching upstream MCP tool call
+- the upstream MCP registry defaults to the workbook server at `SANDRA_WORKBOOK_MCP_URL`
+- the workbook MCP server starts the questionnaire with `use_source_workbook=True`
+- the chat backend renders the questionnaire form HTML from workbook-generated questions
+- the rendered form should hide workbook-only answer letters and scoring values while preserving the submitted values internally
+- the app submits selected internal answer values back through `sandra_chat_turn`
+- the chat backend writes answers via upstream MCP, reads the workbook-generated profile, and asks for explicit short-selling choice
+- the chat backend runs the optimizer/MVP via upstream MCP and returns the final table plus chart images for the UI
+- final chart images should be clickable, inspectable in a large lightbox, maximizable, and downloadable
+
+The app should not rely on native MCP elicitation for the questionnaire because the form is rendered inside the MCP App. Native elicitation remains available for non-app MCP clients through the existing public tools.
+
+Styling should use Tailwind via the MCP App build, with theme values centralized in `mcp_app/src/sandra-app.css`. The app should keep semantic class names for server-rendered form fragments so the theme can change in Tailwind without rewriting Python-generated markup.
+
 ## Session State
 
 Session state should be disk-backed, not memory-only.
 
 Each questionnaire run should get its own session directory under `notebook_outputs/model_sessions/<session_id>/`.
+
+The MCP App also keeps local chat/UI memory in SQLite. The chat backend default is `notebook_outputs/sandra_chat.sqlite3`, and `SANDRA_CHAT_DB_PATH` in `.env` can override it. Credentials and local secrets for the app/server should be kept in `.env`, not in code, notebooks, or committed docs.
+
+The LLM config should be OpenAI-compatible:
+
+- `SANDRA_OPENAI_API_KEY` or `OPENAI_API_KEY`
+- `SANDRA_OPENAI_BASE_URL` or `OPENAI_BASE_URL`
+- `SANDRA_LLM_MODEL` or `OPENAI_MODEL`
+- `SANDRA_MCP_REGISTRY_JSON` can replace the default single upstream workbook MCP server registry when additional MCP servers are added later
+
+The browser API should return structured configuration/provider errors instead of HTTP 500 when the LLM endpoint is missing, unreachable, or misconfigured. The health route should expose redacted diagnostics for model, base URL, and API-key presence.
+
+The browser API should also return structured configuration errors for upstream MCP connection failures, including workbook MCP timeouts, so the UI can tell the operator to restart `./mcp.sh` instead of appearing inert.
+
+The OpenAI-compatible base URL should be treated as a provider API base, not a full endpoint. If a user configures a URL ending in `/chat/completions`, the chat server should normalize it to the base URL before calling the OpenAI SDK.
 
 Each session directory should contain:
 

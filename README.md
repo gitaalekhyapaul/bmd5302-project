@@ -29,6 +29,10 @@ The MCP server is implemented in [mcp_server.py](/Users/gitaalekhyapaul/Document
 
 Current tools:
 
+- `open_sandra_investment_chat(thread_id="default")`
+  - opens the Sandra MCP App UI through `ui://sandra-investment-chat/mcp-app.html`
+  - initializes the local SQLite memory thread used by the LLM chat app
+  - gives non-app hosts a short text fallback
 - `start_investor_questionnaire(workbook_path="Model.xlsm", output_dir="notebook_outputs", visible=False, use_elicitation=True, use_source_workbook=True)`
   - always operates on the source workbook path directly (no per-session workbook copy)
   - runs `RandomizeQuestions`
@@ -55,6 +59,87 @@ Current tools:
   - does not return `chart_paths` in the JSON payload; use `run_investor_mvp` if path-based chart handling is needed
 - `get_model_workbook_contract()`
   - returns the active `Model.xlsm` contract used by Sandra's tools
+
+The server also exposes app-only tools for the MCP App. Compatible hosts should hide these from the model and make them callable only by the UI:
+
+- `sandra_chat_turn`
+- `sandra_chat_memory_snapshot`
+- `sandra_chat_record_event`
+- `sandra_app_memory_snapshot`
+- `sandra_app_record_chat_event`
+- `sandra_app_start_questionnaire_form`
+- `sandra_app_submit_questionnaire_form`
+- `sandra_app_run_mvp`
+
+The `sandra_app_*` tools are direct app workflow helpers. The preferred UI path is `sandra_chat_turn`, which uses the LLM backend and invokes the workbook tools through the configured upstream MCP registry.
+
+## Browser And MCP App UI
+
+The repo includes a shared Sandra UI bundle at [mcp_app/](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/mcp_app:1).
+
+It works in two modes:
+
+- browser mode at `http://127.0.0.1:8001/app`
+- MCP App mode through `ui://sandra-investment-chat/mcp-app.html`
+
+The app is a professional Sandra-branded investment chat surface:
+
+- greets the user on page load
+- starts only after the user presses `Start the consultation`
+- lets the user chat with Sandra in the browser through the Sandra chat/API server
+- streams Sandra's browser replies over server-sent events from `/api/chat/stream`
+- renders Markdown in user, Sandra, status, and error chat bubbles
+- shows an animated loader plus muted mini-log tape while Sandra is waiting on the LLM or workbook MCP server, then collapses the log into a compact expandable status chip
+- renders the questionnaire as an in-app form instead of using native MCP elicitation
+- presents clean answer text to the user while keeping workbook-required answer letters as hidden radio values
+- sends MCP App turns to `sandra_chat_turn`
+- sends browser workflow turns to `/api/chat/stream`
+- uses an OpenAI-compatible LLM to invoke the workbook MCP server under strict workflow rules
+- gets the form HTML from the chat backend after `RandomizeQuestions` runs through MCP
+- writes submitted selections back through upstream MCP into `Model.xlsm`
+- asks the short-selling choice explicitly
+- displays the workbook-generated final table before chart images
+- lets users click chart images to inspect them in a large lightbox, maximize the view, and download the PNG
+
+The app uses Tailwind through the Vite build. Theme tokens are centralized in [mcp_app/src/sandra-app.css](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/mcp_app/src/sandra-app.css:1), so changing the look should start there rather than editing scattered CSS.
+
+## LLM Chat Backend
+
+The LLM-backed chat orchestration lives in [sandra_chat_server.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/sandra_chat_server.py:1).
+
+It can be used in two ways:
+
+- Open the browser chat UI from the standalone chat server at `http://127.0.0.1:8001/app`. This is the normal local web app for chatting with Sandra.
+- Connect a UI-capable MCP host directly to the workbook server on `http://127.0.0.1:8000/mcp`. The workbook server keeps normal MCP tools and also registers the Sandra app resource plus `sandra_chat_turn`.
+- Or run the standalone chat server on `http://127.0.0.1:8001/mcp` and point UI-capable MCP hosts there. The standalone server exposes the app/chat layer and calls the workbook MCP server upstream.
+
+The standalone chat server serves both browser and MCP routes:
+
+- `/` redirects to `/app`
+- `/app` serves the Sandra browser chat UI
+- `/api/chat` runs one LLM-backed chat/action turn
+- `/api/chat/stream` streams `status`, `token`, `result`, and `done` events for browser clients
+- `/api/memory` reads SQLite chat memory
+- `/api/record-event` records local browser UI events or notes
+- `/mcp` remains the MCP endpoint
+
+The chat backend does not let the LLM freely use arbitrary tools. It enforces strict workflow actions and only allows workbook MCP calls that match the current step:
+
+- `start_questionnaire` -> `start_investor_questionnaire`
+- `submit_questionnaire` -> `submit_investor_questionnaire_answers`
+- `run_mvp` -> `run_investor_mvp`
+
+The upstream MCP registry is env-configurable. By default it contains one server:
+
+```bash
+SANDRA_WORKBOOK_MCP_URL=http://127.0.0.1:8000/mcp
+```
+
+To add more MCP servers later, set:
+
+```bash
+SANDRA_MCP_REGISTRY_JSON='[{"name":"workbook","url":"http://127.0.0.1:8000/mcp"}]'
+```
 
 ## Elicitation Behavior
 
@@ -92,6 +177,40 @@ Each session directory contains:
 - chart PNGs under `charts/`
 
 Excel application objects are not kept alive across requests. Each tool call reopens the source workbook path, performs the next workbook-owned step, saves, and closes.
+
+The MCP App keeps local UI/chat memory in SQLite. By default:
+
+- `notebook_outputs/sandra_chat.sqlite3`
+
+Override it in `.env` with:
+
+```bash
+SANDRA_CHAT_DB_PATH=notebook_outputs/sandra_chat.sqlite3
+```
+
+Credentials and local secrets for the app/server belong in `.env`. Use [.env.example](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/.env.example:1) as the template and do not commit `.env`.
+
+OpenAI-compatible LLM config also belongs in `.env`:
+
+```bash
+SANDRA_OPENAI_API_KEY=...
+SANDRA_OPENAI_BASE_URL=...
+SANDRA_LLM_MODEL=...
+```
+
+`SANDRA_OPENAI_BASE_URL` is optional for the default OpenAI endpoint but required for other OpenAI-compatible providers.
+
+For NVIDIA NIM, use the provider API base URL, not the local Sandra or MCP server URL:
+
+```bash
+SANDRA_OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
+```
+
+Do not include `/chat/completions` in `SANDRA_OPENAI_BASE_URL`; the OpenAI SDK adds that path.
+
+If `/api/chat` returns `configuration_required`, check `http://127.0.0.1:8001/api/health` for the redacted LLM diagnostics.
+
+If Sandra cannot reach the upstream workbook MCP server, the browser API returns a `configuration_required` payload instead of HTTP 500. Restart `./mcp.sh` and verify `SANDRA_WORKBOOK_MCP_URL` points at `http://127.0.0.1:8000/mcp`.
 
 ## Notebook Test Surface
 
@@ -143,6 +262,17 @@ If `uv` cache permissions are noisy on this machine, use a workspace-local cache
 UV_CACHE_DIR=.uv-cache uv sync
 ```
 
+Install and build the shared browser/MCP App bundle:
+
+```bash
+npm --prefix mcp_app install
+npm --prefix mcp_app run build
+```
+
+The build writes the single-file browser/MCP App resource to:
+
+- `mcp_app/dist/mcp-app.html`
+
 ## Running The MCP Server
 
 Start the MCP server with the packaged script:
@@ -172,6 +302,20 @@ A typical MCP client config is:
   }
 }
 ```
+
+To run the LLM-backed chat app as a separate MCP server, first keep the workbook server running on port `8000`, then start:
+
+```bash
+./sandra_chat_mcp.sh
+```
+
+The browser chat UI is:
+
+- `http://127.0.0.1:8001/app`
+
+The standalone MCP chat endpoint is:
+
+- `http://127.0.0.1:8001/mcp`
 
 ## Repo-Local Skill
 
@@ -216,6 +360,8 @@ Relevant files:
   - session-backed `Model.xlsm` workflow and Sandra-facing profile messaging
 - [model_workflow.ipynb](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/model_workflow.ipynb:1)
   - notebook test surface for scraping, answer submission, optimizer execution, and chart display
+- [mcp_app/](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/mcp_app:1)
+  - Tailwind/Vite browser and MCP App UI source plus built single-file app resource
 - [excel_workbook_support.py](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/excel_workbook_support.py:1)
   - shared Excel chart export, macro invocation, and exception logging support
 - [PLAN.md](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/PLAN.md:1)

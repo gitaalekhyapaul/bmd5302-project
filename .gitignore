@@ -208,6 +208,10 @@ __marimo__/
 
 # Remove the temporary output files
 notebook_outputs/
+mcp_app/node_modules/
+mcp_app/.vite/
+!mcp_app/dist/
+!mcp_app/dist/mcp-app.html
 # Ignore temp files
 ~$*.xlsm
 # Ignore MacOS system files

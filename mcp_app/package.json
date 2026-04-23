@@ -1,0 +1,26 @@
+{
+  "name": "sandra-mcp-app",
+  "version": "1.0.0",
+  "description": "MCP App UI for Sandra's workbook-backed investment chat.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run typecheck && cross-env INPUT=mcp-app.html vite build",
+    "typecheck": "tsc --noEmit",
+    "dev": "cross-env NODE_ENV=development INPUT=mcp-app.html vite build --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.7.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dompurify": "^3.4.1",
+    "marked": "^18.0.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.4",
+    "cross-env": "^10.1.0",
+    "tailwindcss": "^4.2.4",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.10",
+    "vite-plugin-singlefile": "^2.3.3"
+  }
+}

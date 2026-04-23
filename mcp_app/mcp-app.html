@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sandra Investment Chat</title>
+  </head>
+  <body>
+    <main class="shell" id="app-shell">
+      <section class="workspace" aria-label="Sandra investment chat workspace">
+        <aside class="market-rail" aria-label="Session context">
+          <div class="brand-lockup">
+            <span class="brand-mark">S</span>
+            <div>
+              <p class="eyebrow">Sandra</p>
+              <h1>Investment Chat</h1>
+            </div>
+          </div>
+          <div class="market-line" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <dl class="session-facts">
+            <div>
+              <dt>Engine</dt>
+              <dd>Model.xlsm</dd>
+            </div>
+            <div>
+              <dt>Method</dt>
+              <dd>Workbook-first</dd>
+            </div>
+            <div>
+              <dt>Memory</dt>
+              <dd id="memory-status">Connecting</dd>
+            </div>
+          </dl>
+          <div class="stage-card">
+            <p class="eyebrow">Progress</p>
+            <ol class="stage-list" id="stage-list">
+              <li class="active" data-stage="welcome">Welcome</li>
+              <li data-stage="questionnaire">Questionnaire</li>
+              <li data-stage="profile">Profile</li>
+              <li data-stage="optimizer">Optimizer</li>
+            </ol>
+          </div>
+        </aside>
+
+        <section class="conversation-panel">
+          <div class="conversation-topbar">
+            <div>
+              <p class="eyebrow">Client conversation</p>
+              <h2 id="conversation-title">Portfolio consultation</h2>
+            </div>
+            <button class="ghost-button" id="fullscreen-button" type="button">
+              Focus view
+            </button>
+          </div>
+
+          <div class="chat-scroll" id="chat-scroll" aria-live="polite">
+            <article class="message sandra-message entrance">
+              <div class="avatar">S</div>
+              <div class="bubble">
+                <p class="speaker">Sandra</p>
+                <p>
+                  Good day. I am Sandra, your workbook-backed robo-adviser. I will
+                  guide you through a concise investor questionnaire, then use the
+                  Model.xlsm workbook to produce your profile, optimizer output, and
+                  charts.
+                </p>
+                <button class="primary-button" id="start-chat-button" type="button">
+                  Start the consultation
+                </button>
+              </div>
+            </article>
+          </div>
+
+          <div class="composer">
+            <input
+              id="chat-input"
+              type="text"
+              autocomplete="off"
+              placeholder="Ask Sandra a question or add context before continuing"
+            />
+            <button id="send-chat-button" type="button">Send</button>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="/src/sandra-app.ts"></script>
+  </body>
+</html>

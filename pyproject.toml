@@ -7,6 +7,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "ipykernel>=7.2.0",
     "mcp>=1.18.0",
+    "openai>=2.32.0",
     "pandas>=3.0.2",
     "pillow>=12.2.0",
     "xlwings>=0.16.6",
@@ -14,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 bmd5302-mcp = "mcp_server:main"
+sandra-chat-mcp = "sandra_chat_server:main"
 
 [dependency-groups]
 dev = [
