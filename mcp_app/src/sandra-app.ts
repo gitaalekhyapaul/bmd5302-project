@@ -561,7 +561,16 @@ function renderProfile(payload: ToolPayload) {
     `
       <h3>Your workbook profile</h3>
       ${markdownBlock(profileMessage)}
-      ${investorProfile ? markdownBlock(investorProfile, "status-line") : ""}
+      ${
+        investorProfile
+          ? `
+            <div class="profile-highlight">
+              <p class="profile-highlight-label">Investor profile</p>
+              <p class="profile-highlight-value">${escapeHtml(investorProfile)}</p>
+            </div>
+          `
+          : ""
+      }
       ${markdownBlock("Before I run the optimizer, please make the short-selling choice explicitly.")}
       <div class="short-choice">
         <button class="choice-button" data-short-selling="false" type="button">No short selling</button>
@@ -622,6 +631,29 @@ function renderCharts(images: ChartImage[]) {
     .join("");
 
   return `<div class="chart-grid">${figures}</div>`;
+}
+
+function appendWorkbookOutputs(
+  payload: ToolPayload,
+  heading = "Portfolio model output",
+  intro = "The final table and charts below were generated from Model.xlsm. The annual return values are workbook model assumptions, not guarantees.",
+) {
+  const records = asRecordArray(payload.summary_table_records);
+  const chartImages = (Array.isArray(payload.chart_images) ? payload.chart_images : []) as ChartImage[];
+  if (!records.length && !chartImages.length) {
+    return;
+  }
+
+  const resultBubble = appendMessage(
+    "sandra",
+    `
+      <h3>${escapeHtml(heading)}</h3>
+      ${markdownBlock(intro)}
+      ${renderResultTable(records)}
+      ${renderCharts(chartImages)}
+    `,
+  );
+  attachChartHandlers(resultBubble, chartImages);
 }
 
 function ensureChartLightbox(): HTMLElement {
@@ -785,19 +817,7 @@ async function runOptimizer(allowShortSelling: boolean) {
       );
       return;
     }
-    const records = asRecordArray(payload.summary_table_records);
-    const chartImages = (Array.isArray(payload.chart_images) ? payload.chart_images : []) as ChartImage[];
-
-    const resultBubble = appendMessage(
-      "sandra",
-      `
-        <h3>Portfolio model output</h3>
-        ${markdownBlock("The final table and charts below were generated from Model.xlsm. The annual return values are workbook model assumptions, not guarantees.")}
-        ${renderResultTable(records)}
-        ${renderCharts(chartImages)}
-      `,
-    );
-    attachChartHandlers(resultBubble, chartImages);
+    appendWorkbookOutputs(payload);
   } catch (error) {
     finishStatusBubble(statusBubble, "Optimizer step stopped");
     appendError(error);
@@ -880,10 +900,25 @@ async function sendChatMessage() {
       },
     );
     const finalMessage = asString(payload.assistant_message, "I am ready to continue.");
+    currentSessionId = asString(payload.session_id, currentSessionId);
     if (!sawToken) {
       replaceLoadingWithMarkdown(assistantBubble, finalMessage);
     } else if (streamedText.trim() !== finalMessage.trim()) {
       setBubbleMarkdown(assistantBubble, finalMessage);
+    }
+    if (
+      payload.intent_route === "completed_outputs_replay" ||
+      payload.intent_route === "rerun_mvp_from_message"
+    ) {
+      appendWorkbookOutputs(
+        payload,
+        payload.intent_route === "rerun_mvp_from_message"
+          ? "Updated portfolio output"
+          : "Saved workbook outputs",
+        payload.intent_route === "rerun_mvp_from_message"
+          ? "These table and chart outputs were regenerated from Model.xlsm for your updated short-selling choice. The annual return values are workbook model assumptions, not guarantees."
+          : "These table and chart outputs were replayed from the latest completed Model.xlsm session for this conversation. The annual return values are workbook model assumptions, not guarantees.",
+      );
     }
     memoryStatus.textContent = "Conversation saved";
   } catch (error) {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, closing
@@ -28,6 +29,8 @@ from starlette.responses import (
     Response,
     StreamingResponse,
 )
+
+from model_workflow import MvpWorkflowProgressStore
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +81,82 @@ ALLOWED_WORKBOOK_TOOLS = {
 }
 LOG_MAX_STRING = 400
 LOG_MAX_ITEMS = 12
+COMPLETED_OUTPUT_NOUNS = (
+    "allocation",
+    "allocations",
+    "chart",
+    "charts",
+    "frontier",
+    "graph",
+    "graphs",
+    "numbers",
+    "output",
+    "outputs",
+    "result",
+    "results",
+    "summary",
+    "summaries",
+    "table",
+    "tables",
+    "weight",
+    "weights",
+)
+COMPLETED_OUTPUT_VERBS = (
+    "compare",
+    "display",
+    "drop",
+    "fetch",
+    "give",
+    "pull",
+    "scan",
+    "see",
+    "send",
+    "share",
+    "show",
+)
+COMPLETED_OUTPUT_AFFIRMATIONS = (
+    "do it",
+    "go ahead",
+    "ok",
+    "okay",
+    "please",
+    "sure",
+    "yes",
+    "yeah",
+    "yep",
+)
+COMPLETED_OUTPUT_CONTEXT_TERMS = (
+    "again",
+    "as well",
+    "side by side",
+    "too",
+)
+RERUN_MVP_TERMS = (
+    "calculate",
+    "re calculate",
+    "re-run",
+    "recalc",
+    "recalcualte",
+    "recalculate",
+    "recompute",
+    "rerun",
+    "run",
+    "switch",
+)
+SHORT_SELLING_FALSE_TERMS = (
+    "do not allow short selling",
+    "dont allow short selling",
+    "long only",
+    "long-only",
+    "no short selling",
+    "without short selling",
+)
+SHORT_SELLING_TRUE_TERMS = (
+    "allow short selling",
+    "enable short selling",
+    "short selling allowed",
+    "with short selling",
+)
 LOG_MAX_DEPTH = 4
 
 
@@ -788,6 +867,7 @@ class UpstreamMcpRegistry:
         server_name: str,
         tool_name: str,
         arguments: dict[str, Any],
+        progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         if tool_name not in ALLOWED_WORKBOOK_TOOLS:
             raise SandraChatConfigurationError(
@@ -804,7 +884,15 @@ class UpstreamMcpRegistry:
                 },
             )
             async with self.session(server_name) as session:
-                result = await session.call_tool(tool_name, arguments)
+                if progress_callback is not None and tool_name == "run_investor_mvp":
+                    result = await self._call_tool_with_progress(
+                        session=session,
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        progress_callback=progress_callback,
+                    )
+                else:
+                    result = await session.call_tool(tool_name, arguments)
                 if result.isError:
                     payload = {
                         "status": "error",
@@ -843,6 +931,44 @@ class UpstreamMcpRegistry:
                 f"not complete. Verify ./mcp.sh is running and responsive at {url}, "
                 "then try again."
             ) from exc
+
+    async def _call_tool_with_progress(
+        self,
+        *,
+        session: ClientSession,
+        tool_name: str,
+        arguments: dict[str, Any],
+        progress_callback: Any,
+    ) -> Any:
+        session_id = arguments.get("session_id")
+        if not session_id:
+            return await session.call_tool(tool_name, arguments)
+
+        progress_store = MvpWorkflowProgressStore.create(
+            session_id=str(session_id),
+            output_dir=str(arguments.get("output_dir") or "notebook_outputs"),
+        )
+        initial_snapshot = progress_store.snapshot()
+        last_sequence = int(initial_snapshot.get("sequence") or 0) if initial_snapshot else 0
+        task = asyncio.create_task(session.call_tool(tool_name, arguments))
+        try:
+            while not task.done():
+                snapshot = progress_store.snapshot()
+                sequence = int(snapshot.get("sequence") or 0) if snapshot else 0
+                if snapshot is not None and sequence > last_sequence:
+                    last_sequence = sequence
+                    await progress_callback(snapshot)
+                await asyncio.sleep(0.35)
+            try:
+                return await task
+            finally:
+                snapshot = progress_store.snapshot()
+                sequence = int(snapshot.get("sequence") or 0) if snapshot else 0
+                if snapshot is not None and sequence > last_sequence:
+                    await progress_callback(snapshot)
+        finally:
+            if not task.done():
+                task.cancel()
 
 
 def _content_to_text(content: Any) -> str:
@@ -1198,6 +1324,7 @@ class SandraChatOrchestrator:
         session_id: str | None = None,
         answers: dict[str, str] | None = None,
         allow_short_selling: bool | None = None,
+        progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         t0 = time.perf_counter()
         _log_payload(
@@ -1229,6 +1356,7 @@ class SandraChatOrchestrator:
                 session_id=session_id,
                 answers=answers,
                 allow_short_selling=allow_short_selling,
+                progress_callback=progress_callback,
             )
         except SandraChatConfigurationError as exc:
             logger.warning(
@@ -1256,11 +1384,12 @@ class SandraChatOrchestrator:
             )
             raise
 
+        response_action = str(payload.get("action") or action)
         self.memory.append_event(
             thread_id=thread_id,
             role="assistant",
             content=str(payload.get("assistant_message", "")),
-            event_type=f"{action}_response",
+            event_type=f"{response_action}_response",
             session_id=str(payload.get("session_id") or session_id or ""),
             payload=payload,
         )
@@ -1298,14 +1427,38 @@ class SandraChatOrchestrator:
                     "message": self._status_for_action(action),
                 },
             }
-            payload = await self.turn(
-                thread_id=thread_id,
-                user_message=user_message,
-                action=action,
-                session_id=session_id,
-                answers=answers,
-                allow_short_selling=allow_short_selling,
-            )
+            if action == "run_mvp":
+                progress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+                async def on_progress(snapshot: dict[str, Any]) -> None:
+                    await progress_queue.put(snapshot)
+
+                turn_task = asyncio.create_task(
+                    self.turn(
+                        thread_id=thread_id,
+                        user_message=user_message,
+                        action=action,
+                        session_id=session_id,
+                        answers=answers,
+                        allow_short_selling=allow_short_selling,
+                        progress_callback=on_progress,
+                    )
+                )
+                async for status_payload in self._stream_progress_updates(
+                    task=turn_task,
+                    progress_queue=progress_queue,
+                ):
+                    yield {"event": "status", "payload": status_payload}
+                payload = await turn_task
+            else:
+                payload = await self.turn(
+                    thread_id=thread_id,
+                    user_message=user_message,
+                    action=action,
+                    session_id=session_id,
+                    answers=answers,
+                    allow_short_selling=allow_short_selling,
+                )
             yield {"event": "result", "payload": payload}
             return
 
@@ -1318,35 +1471,79 @@ class SandraChatOrchestrator:
             session_id=session_id,
             payload={"answers": answers, "allow_short_selling": allow_short_selling},
         )
-        yield {
-            "event": "status",
-            "payload": {
-                "status": "streaming",
-                "message": "Sandra is preparing a thoughtful response.",
-            },
-        }
 
         try:
             snapshot = self.memory.snapshot(thread_id)
-            messages = _base_messages(
-                thread_id=thread_id,
-                snapshot=snapshot,
+            intent = self._classify_message_intent(
                 user_message=user_message,
-                action=action,
+                session_id=session_id,
+                snapshot=snapshot,
             )
-            parts: list[str] = []
-            async for token in self.llm.stream_chat_completion_text(messages=messages):
-                parts.append(token)
-                yield {"event": "token", "payload": {"text": token}}
-            assistant_message = "".join(parts).strip() or (
-                "I am ready to guide you through the investment consultation."
-            )
-            payload = {
-                "status": "completed",
-                "thread_id": thread_id,
-                "action": action,
-                "assistant_message": assistant_message,
-            }
+            if intent is not None:
+                yield {
+                    "event": "status",
+                    "payload": {
+                        "status": "working",
+                        "message": str(intent["status_message"]),
+                    },
+                }
+                if str(intent.get("route") or "") == "rerun_mvp_from_message":
+                    progress_queue = asyncio.Queue()
+
+                    async def on_progress(snapshot: dict[str, Any]) -> None:
+                        await progress_queue.put(snapshot)
+
+                    intent_task = asyncio.create_task(
+                        self._execute_message_intent(
+                            thread_id=thread_id,
+                            user_message=user_message,
+                            action=action,
+                            allow_short_selling=allow_short_selling,
+                            intent=intent,
+                            progress_callback=on_progress,
+                        )
+                    )
+                    async for status_payload in self._stream_progress_updates(
+                        task=intent_task,
+                        progress_queue=progress_queue,
+                    ):
+                        yield {"event": "status", "payload": status_payload}
+                    payload = await intent_task
+                else:
+                    payload = await self._execute_message_intent(
+                        thread_id=thread_id,
+                        user_message=user_message,
+                        action=action,
+                        allow_short_selling=allow_short_selling,
+                        intent=intent,
+                    )
+            else:
+                yield {
+                    "event": "status",
+                    "payload": {
+                        "status": "streaming",
+                        "message": "Sandra is preparing a thoughtful response.",
+                    },
+                }
+                messages = _base_messages(
+                    thread_id=thread_id,
+                    snapshot=snapshot,
+                    user_message=user_message,
+                    action=action,
+                )
+                parts: list[str] = []
+                async for token in self.llm.stream_chat_completion_text(messages=messages):
+                    parts.append(token)
+                    yield {"event": "token", "payload": {"text": token}}
+                assistant_message = "".join(parts).strip() or (
+                    "I am ready to guide you through the investment consultation."
+                )
+                payload = {
+                    "status": "completed",
+                    "thread_id": thread_id,
+                    "action": action,
+                    "assistant_message": assistant_message,
+                }
         except SandraChatConfigurationError as exc:
             logger.warning(
                 "orchestrator.stream_turn configuration_required thread_id=%s action=%s error=%s",
@@ -1373,17 +1570,38 @@ class SandraChatOrchestrator:
             )
             raise
 
+        response_action = str(payload.get("action") or action)
         self.memory.append_event(
             thread_id=thread_id,
             role="assistant",
             content=str(payload.get("assistant_message", "")),
-            event_type=f"{action}_response",
+            event_type=f"{response_action}_response",
             session_id=str(payload.get("session_id") or session_id or ""),
             payload=payload,
         )
         payload["elapsed_seconds"] = round(time.perf_counter() - t0, 3)
         _log_payload(logging.INFO, "orchestrator.stream_turn result", payload)
         yield {"event": "result", "payload": payload}
+
+    async def _stream_progress_updates(
+        self,
+        *,
+        task: asyncio.Task[dict[str, Any]],
+        progress_queue: asyncio.Queue[dict[str, Any]],
+    ) -> AsyncIterator[dict[str, Any]]:
+        while True:
+            if task.done() and progress_queue.empty():
+                break
+            try:
+                snapshot = await asyncio.wait_for(progress_queue.get(), timeout=0.35)
+            except asyncio.TimeoutError:
+                continue
+            yield {
+                "status": str(snapshot.get("status") or "working"),
+                "message": str(snapshot.get("message") or "Sandra is still working."),
+                "stage": snapshot.get("stage"),
+                "sequence": snapshot.get("sequence"),
+            }
 
     @staticmethod
     def _status_for_action(action: str) -> str:
@@ -1404,6 +1622,7 @@ class SandraChatOrchestrator:
         session_id: str | None,
         answers: dict[str, str] | None,
         allow_short_selling: bool | None,
+        progress_callback: Any | None,
     ) -> dict[str, Any]:
         logger.debug(
             "orchestrator._run_strict_turn route action=%s thread_id=%s session_id=%s allow_short_selling=%r",
@@ -1412,6 +1631,23 @@ class SandraChatOrchestrator:
             session_id,
             allow_short_selling,
         )
+        if action == "message":
+            snapshot = self.memory.snapshot(thread_id)
+            intent = self._classify_message_intent(
+                user_message=user_message,
+                session_id=session_id,
+                snapshot=snapshot,
+            )
+            if intent is not None:
+                return await self._execute_message_intent(
+                    thread_id=thread_id,
+                    user_message=user_message,
+                    action=action,
+                    allow_short_selling=allow_short_selling,
+                    intent=intent,
+                    progress_callback=progress_callback,
+                )
+
         if action == "start_questionnaire":
             return await self._tool_backed_turn(
                 thread_id=thread_id,
@@ -1427,6 +1663,8 @@ class SandraChatOrchestrator:
                 },
                 state_updates={"stage": "questionnaire"},
                 postprocess=self._postprocess_questionnaire,
+                progress_callback=progress_callback,
+                assistant_message_factory=self._questionnaire_assistant_message,
             )
 
         if action == "submit_questionnaire":
@@ -1447,6 +1685,8 @@ class SandraChatOrchestrator:
                 },
                 state_updates={"stage": "profile", "session_id": session_id},
                 postprocess=self._postprocess_profile,
+                progress_callback=progress_callback,
+                assistant_message_factory=self._profile_assistant_message,
             )
 
         if action == "run_mvp":
@@ -1472,9 +1712,280 @@ class SandraChatOrchestrator:
                     "allow_short_selling": allow_short_selling,
                 },
                 postprocess=self._postprocess_mvp,
+                progress_callback=progress_callback,
             )
 
         return await self._message_only_turn(thread_id, user_message, action)
+
+    def _classify_message_intent(
+        self,
+        *,
+        user_message: str,
+        session_id: str | None,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        state = snapshot.get("state", {})
+        if not isinstance(state, dict):
+            return None
+
+        stage = str(state.get("stage") or "")
+        resolved_session_id = session_id or self._state_string(state.get("session_id"))
+        explicit_short_choice = self._parse_short_selling_choice(user_message)
+        if (
+            resolved_session_id
+            and explicit_short_choice is not None
+            and self._message_requests_mvp_rerun(
+                user_message=user_message,
+                stage=stage,
+            )
+        ):
+            return {
+                "route": "rerun_mvp_from_message",
+                "session_id": resolved_session_id,
+                "allow_short_selling": explicit_short_choice,
+                "status_message": (
+                    "Sandra is rerunning the portfolio model with short selling."
+                    if explicit_short_choice
+                    else "Sandra is rerunning the portfolio model without short selling."
+                ),
+            }
+
+        if stage == "completed" and self._message_requests_completed_outputs(
+            user_message,
+            snapshot,
+        ):
+            return {
+                "route": "completed_outputs_replay",
+                "session_id": resolved_session_id,
+                "status_message": "Sandra is gathering the latest saved workbook outputs.",
+            }
+        return None
+
+    async def _execute_message_intent(
+        self,
+        *,
+        thread_id: str,
+        user_message: str,
+        action: str,
+        allow_short_selling: bool | None,
+        intent: dict[str, Any],
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        route = str(intent.get("route") or "message_intent")
+        resolved_session_id = self._state_string(intent.get("session_id"))
+        if not resolved_session_id:
+            payload = {
+                "status": "saved_outputs_unavailable",
+                "thread_id": thread_id,
+                "action": action,
+                "assistant_message": (
+                    "I do not have a saved workbook session id for these portfolio outputs "
+                    "anymore. Please rerun the optimizer and I will show the table and charts."
+                ),
+                "intent_route": route,
+            }
+            _log_payload(
+                logging.WARNING,
+                "orchestrator._execute_message_intent missing session id",
+                {
+                    "thread_id": thread_id,
+                    "action": action,
+                    "route": route,
+                    "user_message": user_message,
+                    "payload": payload,
+                },
+            )
+            return payload
+
+        if route == "rerun_mvp_from_message":
+            rerun_payload = await self._tool_backed_turn(
+                thread_id=thread_id,
+                user_message=user_message,
+                action="run_mvp",
+                tool_name="run_investor_mvp",
+                forced_arguments={
+                    "session_id": resolved_session_id,
+                    "allow_short_selling": bool(intent.get("allow_short_selling")),
+                    "output_dir": "notebook_outputs",
+                    "visible": False,
+                    "use_elicitation": False,
+                },
+                state_updates={
+                    "stage": "completed",
+                    "session_id": resolved_session_id,
+                    "allow_short_selling": bool(intent.get("allow_short_selling")),
+                },
+                postprocess=self._postprocess_mvp,
+                progress_callback=progress_callback,
+            )
+            rerun_payload["intent_route"] = route
+            _log_payload(
+                logging.INFO,
+                "orchestrator._execute_message_intent rerun response",
+                {
+                    "thread_id": thread_id,
+                    "action": action,
+                    "route": route,
+                    "session_id": resolved_session_id,
+                    "allow_short_selling": rerun_payload.get("allow_short_selling"),
+                    "status": rerun_payload.get("status"),
+                },
+            )
+            return rerun_payload
+
+        try:
+            from model_workflow import ModelWorkbookRunner
+
+            runner = ModelWorkbookRunner()
+            final_state = runner.load_session_state(
+                session_id=resolved_session_id,
+                output_dir="notebook_outputs",
+            )
+            raw_payload = runner.serialize_final_payload(final_state)
+            payload = self._postprocess_mvp(raw_payload)
+            payload.update(
+                {
+                    "status": payload.get("status", "completed"),
+                    "thread_id": thread_id,
+                    "action": action,
+                    "assistant_message": (
+                        "Here are the latest workbook-generated table and charts from "
+                        "your completed session."
+                    ),
+                    "session_id": final_state.session_id,
+                    "intent_route": route,
+                    "allow_short_selling": payload.get(
+                        "allow_short_selling",
+                        allow_short_selling,
+                    ),
+                }
+            )
+            self.memory.update_state(
+                thread_id,
+                {
+                    "last_action": action,
+                    "last_intent_route": route,
+                    "session_id": final_state.session_id,
+                    "allow_short_selling": payload.get("allow_short_selling"),
+                },
+            )
+            _log_payload(
+                logging.INFO,
+                "orchestrator._execute_message_intent replay response",
+                {
+                    "thread_id": thread_id,
+                    "action": action,
+                    "route": route,
+                    "session_id": final_state.session_id,
+                    "payload": payload,
+                },
+            )
+            return payload
+        except (FileNotFoundError, ValueError) as exc:
+            payload = {
+                "status": "saved_outputs_unavailable",
+                "thread_id": thread_id,
+                "action": action,
+                "session_id": resolved_session_id,
+                "assistant_message": (
+                    "I could not reload the saved workbook outputs for this session. "
+                    "Please rerun the optimizer and I will show the table and charts."
+                ),
+                "intent_route": route,
+            }
+            _log_payload(
+                logging.WARNING,
+                "orchestrator._execute_message_intent saved outputs unavailable",
+                {
+                    "thread_id": thread_id,
+                    "action": action,
+                    "route": route,
+                    "session_id": resolved_session_id,
+                    "error": str(exc),
+                    "payload": payload,
+                },
+            )
+            return payload
+
+    @staticmethod
+    def _message_requests_mvp_rerun(
+        *,
+        user_message: str,
+        stage: str,
+    ) -> bool:
+        if stage not in {"profile", "completed"}:
+            return False
+        normalized = SandraChatOrchestrator._normalize_intent_text(user_message)
+        if not normalized:
+            return False
+        if stage == "profile":
+            return True
+        return any(term in normalized for term in RERUN_MVP_TERMS)
+
+    @staticmethod
+    def _message_requests_completed_outputs(
+        user_message: str,
+        snapshot: dict[str, Any],
+    ) -> bool:
+        normalized = SandraChatOrchestrator._normalize_intent_text(user_message)
+        if not normalized:
+            return False
+
+        mentions_output = any(term in normalized for term in COMPLETED_OUTPUT_NOUNS)
+        mentions_show_verb = any(term in normalized for term in COMPLETED_OUTPUT_VERBS)
+        is_affirmation = any(
+            normalized == term or normalized.startswith(f"{term} ")
+            for term in COMPLETED_OUTPUT_AFFIRMATIONS
+        )
+
+        if mentions_output and (
+            mentions_show_verb
+            or is_affirmation
+            or any(term in normalized for term in COMPLETED_OUTPUT_CONTEXT_TERMS)
+        ):
+            return True
+
+        if not is_affirmation:
+            return False
+
+        last_assistant_message = SandraChatOrchestrator._last_assistant_message(snapshot)
+        return bool(
+            last_assistant_message
+            and any(term in last_assistant_message for term in COMPLETED_OUTPUT_NOUNS)
+        )
+
+    @staticmethod
+    def _last_assistant_message(snapshot: dict[str, Any]) -> str:
+        recent_events = snapshot.get("recent_events", [])
+        if not isinstance(recent_events, list):
+            return ""
+        for event in reversed(recent_events):
+            if not isinstance(event, dict):
+                continue
+            if str(event.get("role")) != "assistant":
+                continue
+            return SandraChatOrchestrator._normalize_intent_text(str(event.get("content") or ""))
+        return ""
+
+    @staticmethod
+    def _normalize_intent_text(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+    @staticmethod
+    def _state_string(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _parse_short_selling_choice(user_message: str) -> bool | None:
+        normalized = SandraChatOrchestrator._normalize_intent_text(user_message)
+        if any(term in normalized for term in SHORT_SELLING_FALSE_TERMS):
+            return False
+        if any(term in normalized for term in SHORT_SELLING_TRUE_TERMS):
+            return True
+        return None
 
     async def _tool_backed_turn(
         self,
@@ -1486,6 +1997,8 @@ class SandraChatOrchestrator:
         forced_arguments: dict[str, Any],
         state_updates: dict[str, Any],
         postprocess: Any,
+        progress_callback: Any | None = None,
+        assistant_message_factory: Any | None = None,
     ) -> dict[str, Any]:
         self.llm.validate()
         server_name = self.registry.default_server_name()
@@ -1538,42 +2051,46 @@ class SandraChatOrchestrator:
             server_name=server_name,
             tool_name=tool_name,
             arguments=forced_arguments,
-        )
-        if message is not None:
-            messages.append(_message_to_dict(message))
-        if tool_calls:
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_calls[0].id,
-                    "content": json.dumps(tool_payload, default=str),
-                }
-            )
-            final_response = await self.llm.chat_completion(messages=messages)
-        else:
-            final_response = await self.llm.chat_completion(
-                messages=
-                messages
-                + [
-                    {
-                        "role": "system",
-                        "content": (
-                            "The workbook tool was executed directly because the model did "
-                            "not emit the required tool call. Use the tool result JSON "
-                            "below to prepare the user-facing reply."
-                        ),
-                    },
-                    {
-                        "role": "system",
-                        "content": f"Tool result JSON: {json.dumps(tool_payload, default=str)}",
-                    },
-                ]
-            )
-        assistant_message = _extract_assistant_text(
-            final_response,
-            "The workbook step completed.",
+            progress_callback=progress_callback,
         )
         payload = postprocess(tool_payload)
+        if assistant_message_factory is not None:
+            assistant_message = str(assistant_message_factory(payload)).strip()
+        else:
+            if message is not None:
+                messages.append(_message_to_dict(message))
+            if tool_calls:
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_calls[0].id,
+                        "content": json.dumps(tool_payload, default=str),
+                    }
+                )
+                final_response = await self.llm.chat_completion(messages=messages)
+            else:
+                final_response = await self.llm.chat_completion(
+                    messages=
+                    messages
+                    + [
+                        {
+                            "role": "system",
+                            "content": (
+                                "The workbook tool was executed directly because the model did "
+                                "not emit the required tool call. Use the tool result JSON "
+                                "below to prepare the user-facing reply."
+                            ),
+                        },
+                        {
+                            "role": "system",
+                            "content": f"Tool result JSON: {json.dumps(tool_payload, default=str)}",
+                        },
+                    ]
+                )
+            assistant_message = _extract_assistant_text(
+                final_response,
+                "The workbook step completed.",
+            )
         payload.update(
             {
                 "status": payload.get("status", "completed"),
@@ -1631,6 +2148,32 @@ class SandraChatOrchestrator:
         return payload | {
             "next_ui_step": "Ask the user to choose whether short selling is allowed."
         }
+
+    @staticmethod
+    def _questionnaire_assistant_message(payload: dict[str, Any]) -> str:
+        question_count = len(payload.get("questions", [])) if isinstance(
+            payload.get("questions"),
+            list,
+        ) else 0
+        if question_count > 0:
+            return (
+                f"I have prepared {question_count} workbook-backed risk questions for you. "
+                "Please complete them and submit when you are ready."
+            )
+        return "I have prepared your workbook-backed risk questionnaire."
+
+    @staticmethod
+    def _profile_assistant_message(payload: dict[str, Any]) -> str:
+        investor_profile = str(payload.get("investor_profile") or "").strip()
+        if investor_profile:
+            return (
+                f"Your workbook profile is {investor_profile}. "
+                "Please choose whether short selling should be allowed before I run the optimizer."
+            )
+        return (
+            "Your workbook profile is ready. Please choose whether short selling "
+            "should be allowed before I run the optimizer."
+        )
 
     def _postprocess_mvp(self, payload: dict[str, Any]) -> dict[str, Any]:
         return payload | {

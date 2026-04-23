@@ -405,6 +405,26 @@
     @apply mt-3 flex flex-wrap gap-2.5;
   }
 
+  .profile-highlight {
+    @apply my-4 inline-flex min-w-[min(100%,320px)] flex-col gap-1.5 rounded-[20px] border px-5 py-4;
+    border-color: rgba(240, 217, 138, 0.42);
+    background:
+      linear-gradient(135deg, rgba(216, 184, 98, 0.2), rgba(216, 184, 98, 0.06)),
+      rgba(255, 255, 255, 0.03);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 18px 45px rgba(216, 184, 98, 0.1);
+  }
+
+  .profile-highlight-label {
+    @apply mb-0 text-[0.7rem] font-bold uppercase tracking-[0.16em] text-gold-strong;
+  }
+
+  .profile-highlight-value {
+    @apply mb-0 text-[clamp(1.35rem,2.5vw,1.95rem)] font-extrabold tracking-[-0.03em] text-parchment;
+    text-wrap: balance;
+  }
+
   .choice-button {
     @apply border border-[rgba(216,196,146,0.18)] bg-white/[0.04] px-[18px] text-parchment;
   }

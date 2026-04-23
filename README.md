@@ -56,6 +56,7 @@ Current tools:
   - writes `B6`
   - runs `CalculateMVP` on the calculator sheet's own `C19:C28` model
   - waits for the workbook-owned calculator stats, weight cells, and final output snapshot to settle before reading results
+  - emits workbook-run milestones for opening Excel, running the optimizer, syncing the calculator sheet, waiting for workbook outputs, reading the summary table, and exporting charts
   - returns `A18:D28` plus final chart paths
 - `run_investor_mvp_with_chart_images(...)`
   - same as `run_investor_mvp`
@@ -103,6 +104,7 @@ The app is a professional Sandra-branded investment chat surface:
 - gets the form HTML from the chat backend after `RandomizeQuestions` runs through MCP
 - writes submitted selections back through upstream MCP into `Model.xlsm`
 - asks the short-selling choice explicitly
+- displays the workbook-generated investor profile in a bright highlighted block instead of muted status text
 - displays the workbook-generated final table before chart images
 - lets users click chart images to inspect them in a large lightbox, maximize the view, and download the PNG
 
@@ -137,6 +139,12 @@ The chat backend does not let the LLM freely use arbitrary tools. It enforces st
 - `run_mvp` -> `run_investor_mvp`
 
 If the provider fails to emit the required tool call for one of those forced actions, the chat backend now falls back to a direct upstream workbook-tool invocation and records `tool_call_path` in the payload/logs.
+
+For deterministic UI steps, the chat backend does not wait for an extra post-tool LLM pass once the workbook payload is already available. `start_questionnaire` and `submit_questionnaire` now return directly from the workbook-backed tool result plus server-side response shaping, which avoids the extra stall after the workbook server has already replied.
+
+Freeform `action="message"` turns remain chat-only by default, but the backend now inspects the saved thread state. If the thread is already at the completed portfolio stage and the user asks to show tables, charts, or prior results, the chat backend replays the latest saved workbook outputs for that session instead of leaving the request as a plain text-only reply. If the thread is at the profile or completed stage and the user explicitly asks to rerun the optimizer with or without short selling, the backend upgrades that freeform message into a real `run_investor_mvp` workbook call. The browser chat UI renders both replayed and rerun table/chart payloads directly in the conversation.
+
+During a real `run_mvp` workbook execution, the browser SSE stream now forwards step-level status updates from the workbook side instead of staying silent until the final payload arrives. Those statuses are sourced from the shared session progress state written during the MVP run.
 
 ## Sandra Knowledge Base
 

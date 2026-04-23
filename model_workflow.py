@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import string
 import time
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 import pandas as pd
@@ -246,6 +246,61 @@ class ModelSessionPaths:
         return self.chart_dir / f"{_sanitize_filename(chart_name)}.png"
 
 
+@dataclass(frozen=True, slots=True)
+class MvpWorkflowProgressStore:
+    session_id: str
+    progress_path: Path
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        session_id: str,
+        output_dir: str | Path = "notebook_outputs",
+    ) -> MvpWorkflowProgressStore:
+        resolved_output_dir = Path(output_dir).expanduser().resolve()
+        session_dir = resolved_output_dir / "model_sessions" / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        return cls(
+            session_id=session_id,
+            progress_path=session_dir / "mvp_progress.json",
+        )
+
+    def snapshot(self) -> dict[str, Any] | None:
+        if not self.progress_path.exists():
+            return None
+        try:
+            payload = json.loads(self.progress_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def emit(
+        self,
+        *,
+        stage: str,
+        message: str,
+        status: str = "working",
+        allow_short_selling: bool | None = None,
+    ) -> dict[str, Any]:
+        current = self.snapshot() or {}
+        sequence = int(current.get("sequence") or 0) + 1
+        payload = {
+            "session_id": self.session_id,
+            "status": status,
+            "stage": stage,
+            "message": message,
+            "sequence": sequence,
+            "updated_at": _utc_now_iso(),
+            "allow_short_selling": allow_short_selling,
+        }
+        self.progress_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.progress_path.with_name(f"{self.progress_path.name}.tmp")
+        temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temp_path.replace(self.progress_path)
+        return payload
+
+
 class ShortSellingChoice(BaseModel):
     allow_short_selling: bool = Field(
         title="Allow short selling?",
@@ -365,6 +420,7 @@ class ModelWorkbookRunner:
         output_dir: str | Path = "notebook_outputs",
         *,
         visible: bool = False,
+        progress_callback: Callable[[str, str], None] | None = None,
     ) -> QuestionnaireSessionState:
         state = self.load_session_state(session_id=session_id, output_dir=output_dir)
         if not state.answers:
@@ -375,33 +431,57 @@ class ModelWorkbookRunner:
 
         paths = ModelSessionPaths.from_state(state)
 
+        def emit_progress(stage: str, message: str) -> None:
+            if progress_callback is not None:
+                progress_callback(stage, message)
+
         try:
+            emit_progress("opening_excel", "Opening the workbook in Excel.")
             with xw.App(visible=visible, add_book=False) as app:
                 app.display_alerts = False
                 app.screen_updating = False
 
                 book = app.books.open(str(paths.workbook_copy))
                 try:
+                    emit_progress("running_optimizer", "Running the optimizer sheet.")
                     self._run_optimizer(book, allow_short_selling=allow_short_selling)
                     calculator_sheet = book.sheets[self.contract.calculator_sheet]
                     # CalculateMVP's VBA uses Solver on the calculator sheet's
                     # own model (C19:C28) and assumes that sheet context is live.
                     # The optimizer macro leaves 12_Optimizer active, so sync and
                     # activate the calculator sheet first to match button-driven use.
+                    emit_progress(
+                        "syncing_calculator",
+                        "Switching to the calculator sheet and syncing workbook formulas.",
+                    )
                     book.app.calculate()
                     calculator_sheet.activate()
                     time.sleep(0.25)
                     calculator_sheet.range(self.contract.short_selling_cell).value = (
                         "Yes" if allow_short_selling else "No"
                     )
+                    emit_progress(
+                        "running_calculator_macro",
+                        "Running the calculator macro for the final portfolio weights.",
+                    )
                     call_vba_macro(book, self.contract.calculator_macro_name)
                     book.app.calculate()
-                    self._wait_for_mvp_outputs(calculator_sheet)
+                    emit_progress(
+                        "waiting_for_outputs",
+                        "Waiting for the workbook outputs to settle.",
+                    )
+                    self._wait_for_mvp_outputs(
+                        calculator_sheet,
+                        progress_callback=emit_progress,
+                    )
+                    emit_progress("saving_workbook", "Saving the workbook outputs.")
                     book.save()
 
+                    emit_progress("reading_summary", "Reading the final portfolio table.")
                     summary_matrix, summary_columns, summary_records = self._read_summary_table(
                         calculator_sheet
                     )
+                    emit_progress("exporting_charts", "Exporting the workbook charts.")
                     chart_paths = self._export_final_charts(book, paths)
                 finally:
                     book.close()
@@ -422,6 +502,7 @@ class ModelWorkbookRunner:
         state.status = "completed"
         state.updated_at = _utc_now_iso()
         self._save_session_state(state)
+        emit_progress("completed", "Portfolio output is ready.")
         return state
 
     def load_session_state(
@@ -676,8 +757,10 @@ class ModelWorkbookRunner:
         *,
         timeout_seconds: float = 15.0,
         poll_interval_seconds: float = 0.25,
+        progress_callback: Callable[[str, str], None] | None = None,
     ) -> None:
         deadline = time.monotonic() + timeout_seconds
+        next_progress_ping = time.monotonic() + 2.0
         previous_snapshot: tuple[Any, ...] | None = None
         stable_snapshot_reads = 0
         last_stats_values: Any = None
@@ -726,6 +809,13 @@ class ModelWorkbookRunner:
                     f"{last_weight_values!r}, summary range "
                     f"{self.contract.summary_range}={last_summary_matrix!r}."
                 )
+
+            if progress_callback is not None and time.monotonic() >= next_progress_ping:
+                progress_callback(
+                    "waiting_for_outputs",
+                    "Excel is still settling the final portfolio table and chart inputs.",
+                )
+                next_progress_ping = time.monotonic() + 2.0
 
             time.sleep(poll_interval_seconds)
 

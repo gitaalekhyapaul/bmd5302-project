@@ -23,6 +23,7 @@ from model_workflow import (
     ADVISOR_NAME,
     ModelWorkbookContract,
     ModelWorkbookRunner,
+    MvpWorkflowProgressStore,
     ShortSellingChoice,
     accepted_answers_from_elicitation,
 )
@@ -1110,6 +1111,10 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         started: float,
     ) -> dict[str, Any]:
         runner = ModelWorkbookRunner()
+        progress_store = MvpWorkflowProgressStore.create(
+            session_id=session_id,
+            output_dir=output_dir,
+        )
         _log_payload(
             logging.INFO,
             "_run_investor_mvp_workflow request",
@@ -1201,14 +1206,30 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
             session_id,
             allow_short_selling,
         )
+        progress_store.emit(
+            stage="starting",
+            message="Preparing the workbook-backed portfolio run.",
+            allow_short_selling=allow_short_selling,
+        )
         try:
             final_state = runner.run_mvp(
                 session_id=session_id,
                 allow_short_selling=allow_short_selling,
                 output_dir=output_dir,
                 visible=visible,
+                progress_callback=lambda stage, message: progress_store.emit(
+                    stage=stage,
+                    message=message,
+                    allow_short_selling=allow_short_selling,
+                ),
             )
         except Exception:
+            progress_store.emit(
+                stage="failed",
+                message="The workbook run stopped before the portfolio output was ready.",
+                status="failed",
+                allow_short_selling=allow_short_selling,
+            )
             _log_payload(
                 logging.ERROR,
                 "_run_investor_mvp_workflow workbook execution failed",

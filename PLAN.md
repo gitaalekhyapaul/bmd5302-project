@@ -118,6 +118,14 @@ The tool should:
   - calculator stats `B12:B15` should be numeric
   - weight cells `C19:C28` should be numeric
   - the final output snapshot should stop changing across consecutive reads
+- emit workbook-side MVP progress milestones for:
+  - opening Excel/workbook
+  - running the optimizer sheet
+  - syncing the calculator sheet
+  - running `CalculateMVP`
+  - waiting for outputs to settle
+  - reading the summary table
+  - exporting charts
 - extract cells `A18:D28`
 - export both charts from sheet `2_MVP_Calculator`:
   - `MVP_FrontierChart`
@@ -160,13 +168,19 @@ The app flow should be:
 - MCP App UI calls `sandra_chat_turn` with a strict action such as `start_questionnaire`
 - the chat backend calls the OpenAI-compatible API and forces the matching upstream MCP tool call
 - if the provider does not emit the required tool call for a forced action, the chat backend should fall back to a direct upstream workbook-tool execution and log that fallback path
+- deterministic workflow steps that already have complete structured workbook payloads, such as questionnaire creation and profile submission, should not wait on an extra post-tool LLM pass before returning to the browser
+- during `run_mvp`, the main workbook server should persist session-scoped progress state and the chat backend should forward each new progress milestone as a browser SSE `status` event while the upstream tool call is still running
+- freeform `message` turns should remain chat-only by default, but if the saved thread state is already `completed` and the user asks to see tables, charts, or prior results, the backend should auto-route that message into a saved-output replay path for the latest completed session
+- if the thread is at the `profile` or `completed` stage and the user explicitly asks to rerun with or without short selling, the backend should upgrade that freeform message into a real `run_investor_mvp` call with the parsed short-selling choice
 - the upstream MCP registry defaults to the workbook server at `SANDRA_WORKBOOK_MCP_URL`
 - the workbook MCP server starts the questionnaire with `use_source_workbook=True`
 - the chat backend renders the questionnaire form HTML from workbook-generated questions
 - the rendered form should hide workbook-only answer letters and scoring values while preserving the submitted values internally
 - the app submits selected internal answer values back through `sandra_chat_turn`
 - the chat backend writes answers via upstream MCP, reads the workbook-generated profile, and asks for explicit short-selling choice
+- the browser UI should present the workbook-generated investor profile as a bright highlighted result block rather than muted secondary status text
 - the chat backend runs the optimizer/MVP via upstream MCP and returns the final table plus chart images for the UI
+- when a replayed or rerun output payload is returned on a freeform chat turn, the browser UI should render the summary table and chart images in chat instead of treating the response as plain text only
 - final chart images should be clickable, inspectable in a large lightbox, maximizable, and downloadable
 
 The app should not rely on native MCP elicitation for the questionnaire because the form is rendered inside the MCP App. Native elicitation remains available for non-app MCP clients through the existing public tools.
