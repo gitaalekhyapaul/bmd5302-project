@@ -174,7 +174,7 @@ function appendLoadingMessage(markdown: string): HTMLElement {
         <div class="loader-body" data-progress-details>
           ${markdownBlock(markdown, "status-line loader-message")}
           <ol class="mini-log" data-mini-log>
-            <li>Queued in Sandra's workflow</li>
+            <li>Queued for Sandra</li>
           </ol>
         </div>
       </div>
@@ -328,7 +328,7 @@ async function callBrowserApi(name: string, args: ToolPayload = {}): Promise<Too
 
   const payload = (await response.json()) as ToolPayload;
   if (!response.ok) {
-    throw new Error(messageFromPayload(payload, "Sandra chat API request failed."));
+    throw new Error(messageFromPayload(payload, "Sandra could not complete that request."));
   }
   return payload;
 }
@@ -354,7 +354,7 @@ async function callBrowserChatStream(
   });
   if (!response.ok || !response.body) {
     const text = await response.text();
-    let errorMessage = text || "Sandra chat stream failed.";
+    let errorMessage = text || "Sandra could not complete that request.";
     try {
       const payload = JSON.parse(text) as ToolPayload;
       errorMessage = messageFromPayload(payload, errorMessage);
@@ -399,7 +399,7 @@ async function callBrowserChatStream(
       return;
     }
     if (eventName === "error") {
-      throw new Error(messageFromPayload(payload, "Sandra chat stream failed."));
+      throw new Error(messageFromPayload(payload, "Sandra could not complete that request."));
     }
   }
 
@@ -473,7 +473,7 @@ function attachQuestionnaireHandlers(container: HTMLElement) {
     submitButton.disabled = true;
     appendMarkdownMessage("user", "I have completed the investor questionnaire.");
     const statusBubble = appendStatus(
-      "Thank you. I am writing those answers into Model.xlsm and reading the workbook-generated investor profile.",
+      "Thank you. I am saving your answers and reading your risk profile.",
     );
 
     try {
@@ -496,7 +496,7 @@ function attachQuestionnaireHandlers(container: HTMLElement) {
         statusBubble,
         asString(payload.status) === "configuration_required"
           ? "Needs operator attention"
-          : "Workbook profile returned",
+          : "Risk profile ready",
       );
       setStage("profile");
       renderProfile(payload);
@@ -514,7 +514,10 @@ function renderQuestionnaire(payload: ToolPayload) {
   if (asString(payload.status) === "configuration_required") {
     appendMarkdownMessage(
       "sandra",
-      messageFromPayload(payload, "Sandra needs the workbook MCP server before this step can continue."),
+      messageFromPayload(
+        payload,
+        "I cannot reach the workbook calculation service yet. Please start ./mcp.sh, then try again.",
+      ),
     );
     return;
   }
@@ -523,7 +526,7 @@ function renderQuestionnaire(payload: ToolPayload) {
   if (!formHtml) {
     const message = asString(
       payload.assistant_message,
-      "The server did not return a questionnaire form.",
+      "I could not prepare the questionnaire form yet.",
     );
     appendMarkdownMessage("sandra", message);
     return;
@@ -539,14 +542,17 @@ function renderProfile(payload: ToolPayload) {
   if (asString(payload.status) === "configuration_required") {
     appendMarkdownMessage(
       "sandra",
-      messageFromPayload(payload, "Sandra needs the workbook MCP server before this step can continue."),
+      messageFromPayload(
+        payload,
+        "I cannot reach the workbook calculation service yet. Please start ./mcp.sh, then try again.",
+      ),
     );
     return;
   }
 
   const profileMessage = asString(
     payload.creative_profile_message,
-    "Your investor profile has been produced by the workbook.",
+    "Your investor profile is ready.",
   );
   const investorProfile = asString(payload.investor_profile);
 
@@ -742,7 +748,7 @@ async function runOptimizer(allowShortSelling: boolean) {
     markdownBlock(allowShortSelling ? "Allow short selling." : "Do not allow short selling."),
   );
   const statusBubble = appendStatus(
-    "I am running the optimizer macros and calculator sheet in Model.xlsm. Excel may briefly come forward while workbook charts are exported.",
+    "I am running the portfolio model and preparing your charts. Excel may briefly come forward while the workbook exports them.",
   );
 
   try {
@@ -767,12 +773,15 @@ async function runOptimizer(allowShortSelling: boolean) {
       statusBubble,
       asString(payload.status) === "configuration_required"
         ? "Needs operator attention"
-        : "Optimizer artifacts returned",
+        : "Portfolio output ready",
     );
     if (asString(payload.status) === "configuration_required") {
       appendMarkdownMessage(
         "sandra",
-        messageFromPayload(payload, "Sandra needs the workbook MCP server before this step can continue."),
+        messageFromPayload(
+          payload,
+          "I cannot reach the workbook calculation service yet. Please start ./mcp.sh, then try again.",
+        ),
       );
       return;
     }
@@ -782,7 +791,7 @@ async function runOptimizer(allowShortSelling: boolean) {
     const resultBubble = appendMessage(
       "sandra",
       `
-        <h3>Workbook optimizer output</h3>
+        <h3>Portfolio model output</h3>
         ${markdownBlock("The final table and charts below were generated from Model.xlsm. The annual return values are workbook model assumptions, not guarantees.")}
         ${renderResultTable(records)}
         ${renderCharts(chartImages)}
@@ -800,14 +809,14 @@ async function startConsultation() {
   setStage("questionnaire");
   appendMarkdownMessage("user", "Start the consultation.");
   const statusBubble = appendStatus(
-    "I am opening Model.xlsm, randomizing the questionnaire, and rendering the answer form from the workbook output.",
+    "I am preparing a fresh set of risk questions from the project workbook.",
   );
 
   try {
     const payload = await callChatTurn(
       {
         thread_id: threadId,
-        user_message: "Start Sandra's workbook-backed investor questionnaire.",
+        user_message: "Start Sandra's investor questionnaire.",
         action: "start_questionnaire",
       },
       {
@@ -821,7 +830,7 @@ async function startConsultation() {
       statusBubble,
       asString(payload.status) === "configuration_required"
         ? "Needs operator attention"
-        : "Questionnaire form ready",
+        : "Questionnaire ready",
     );
     renderQuestionnaire(payload);
   } catch (error) {
@@ -840,7 +849,7 @@ async function sendChatMessage() {
   sendChatButton.disabled = true;
   appendMarkdownMessage("user", message);
   const assistantBubble = appendStatus(
-    "I am reviewing that with the current conversation memory and workbook-grounded rules.",
+    "I am reviewing that with your conversation context and the project methodology.",
   );
 
   try {

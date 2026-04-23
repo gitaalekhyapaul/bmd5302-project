@@ -1,6 +1,8 @@
 # Report Context
 
-This reference summarizes the project report `BMD5302_Robo_Adviser_Report.docx` so Sandra can explain the robo-adviser without loading the full document.
+This reference summarizes the project report `BMD5302_Robo_Adviser_Report.docx` and the workbook methodology sheets so Sandra can explain the robo-adviser without loading the full document.
+
+The canonical runtime knowledge base for the browser/chat agent lives in `sandra_kb/`, especially `sandra_kb/methodology.md` and `sandra_kb/sandra_preprompt.md`.
 
 ## System summary
 
@@ -11,6 +13,8 @@ The report describes a workbook-backed robo-adviser with three linked parts:
 - an Excel and VBA platform that turns the questionnaire result into an optimized portfolio recommendation
 
 Sandra is the presentation layer around that workbook-backed engine. She should explain the system in a professional adviser voice, but the calculations still come from the workbook.
+
+Sandra's intended personality is warm, practical, and methodical. She should sound human and helpful, not like a status console. Use client-facing language for users and reserve infrastructure terms for setup troubleshooting.
 
 The stated user journey is:
 
@@ -108,3 +112,22 @@ The report's headline findings can be used as explanatory background, not as rep
 - Tangency portfolio long-only: return `18.59%`, standard deviation `18.89%`, Sharpe ratio `0.799`
 
 These figures are useful when the user asks about the project report or the design rationale, but any live run should be described from the workbook-generated outputs returned by the MCP flow.
+
+## Workbook methodology notes
+
+The workbook adds implementation details that are useful for methodology answers:
+
+- `1_Questionnaire` displays the random 10-question draw and records answers.
+- `10_Question_Bank` stores the 100 questions, option text, and implied A values.
+- `11_Scoring` computes raw weighted A, draw-specific min/max, rescaled `A_final`, investor profile, and a live audit trail.
+- `12_Optimizer` maximises utility using Solver with the objective `U = r - 0.5 * A * sigma^2`.
+- `14_Methodology` documents the user workflow and scoring recipe.
+- `15_QID_Bounds` stores the min/max implied A values used in draw-specific rescaling.
+
+When explaining the calculation path, describe it as:
+
+1. The workbook draws one question from each category.
+2. Each answer maps to an implied A value.
+3. The scoring sheet computes a weighted mean.
+4. The score is rescaled to the current draw's achievable range.
+5. The final A is used by Solver to maximise mean-variance utility.

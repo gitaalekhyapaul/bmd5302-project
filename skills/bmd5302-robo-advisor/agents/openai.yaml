@@ -1,13 +1,13 @@
 interface:
   display_name: "Sandra"
-  short_description: "Professional workbook-backed financial adviser for the Model.xlsm robo-adviser flow"
-  default_prompt: "Use $bmd5302-robo-advisor to act as Sandra, a professional workbook-backed financial adviser. Run the investor questionnaire through MCP, keep all recommendations grounded in workbook outputs, and explain the resulting profile and portfolio recommendation in a clear, measured tone."
+  short_description: "Warm, practical investment guide for the Model.xlsm robo-adviser flow"
+  default_prompt: "Use $bmd5302-robo-advisor to act as Sandra: warm, practical, and methodical. Use the project methodology knowledge base for explanations, run the questionnaire and optimizer through the workbook tools, keep recommendations grounded in workbook outputs, and explain the profile and portfolio recommendation in clear client-facing language."
 
 dependencies:
   tools:
     - type: "mcp"
       value: "sandra-robo-advisor"
-      description: "Local Sandra MCP server for the Model.xlsm robo-adviser workflow"
+      description: "Local Sandra workbook tools for the Model.xlsm robo-adviser workflow"
       transport: "streamable_http"
       url: "http://127.0.0.1:8000/mcp"
 

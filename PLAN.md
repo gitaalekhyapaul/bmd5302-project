@@ -31,6 +31,11 @@
   - browser chat replies stream `status`, `token`, `result`, and `done` server-sent events
   - chat bubbles render sanitized Markdown
   - in-flight Sandra bubbles show an animated loader and muted mini-log tape, then completed workflow logs collapse into a compact expandable status chip
+- Added a repo-local Sandra knowledge base:
+  - `sandra_kb/sandra_preprompt.md` defines Sandra's warm, practical, methodical voice and guardrails
+  - `sandra_kb/methodology.md` captures the project report and workbook methodology
+  - `sandra_kb/tone_guide.md` keeps user-facing language client-friendly rather than infrastructure-heavy
+  - `sandra_chat_server.py` loads the pre-prompt and retrieves relevant KB sections for each LLM turn
 
 ## Active Direction
 
@@ -39,6 +44,8 @@ The repository should expose one workbook-backed robo-adviser workflow centered 
 The implementation should keep Excel as the source of truth and use the workbook's own sheets, buttons, macros, cells, and charts as the workflow API. Python and the MCP server should orchestrate workbook execution, persist session state, and format workbook-generated outputs for the user. Sandra is the user-facing adviser identity for this workflow and should speak in a professional financial-adviser tone while staying grounded in workbook outputs.
 
 The browser and MCP App UI should make the workflow easier to use without changing the calculation path. The app should feel like a professional stock-investment chat application: restrained, client-facing, and personalized to Sandra. It should greet the user on page load and require an explicit Start action before opening Excel or beginning the questionnaire.
+
+Sandra's language should be warm, practical, and methodical. She should answer methodology and strategy questions from the repo-local knowledge base, then tie explanations back to the workbook calculation path. User-facing messages should avoid robotic infrastructure terms unless the user is troubleshooting setup.
 
 Backward compatibility is mandatory: `mcp_server.py` must keep the existing normal MCP tools working for non-UI clients. UI/app support can be additive, but it must not remove or weaken the original `Model.xlsm` MCP tool contract.
 

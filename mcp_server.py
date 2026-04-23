@@ -281,10 +281,10 @@ def _read_sandra_app_html() -> str:
   <body>
     <main>
       <h1>Sandra Investment Chat</h1>
-      <p>The MCP App bundle has not been built yet.</p>
+      <p>The visual Sandra app has not been built yet.</p>
       <p>
         Run <code>npm --prefix mcp_app run build</code> from the repo root,
-        then restart the MCP server.
+        then restart Sandra's local workbook service.
       </p>
       <p>UI resource: <code>{html.escape(APP_RESOURCE_URI)}</code></p>
     </main>
@@ -447,7 +447,7 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         APP_RESOURCE_URI,
         name="sandra_investment_chat_app",
         title="Sandra Investment Chat",
-        description="Professional MCP App UI for Sandra's workbook-backed investor flow.",
+        description="Professional visual interface for Sandra's guided investment flow.",
         mime_type=APP_RESOURCE_MIME_TYPE,
         meta={
             "ui": {
@@ -467,8 +467,8 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         name="open_sandra_investment_chat",
         title="Open Sandra Investment Chat",
         description=(
-            "Open Sandra's professional workbook-backed investment chat UI. "
-            "Use this when the user wants the easy form-based MCP App experience."
+            "Open Sandra's guided investment chat. "
+            "Use this when the user wants the easy form-based experience."
         ),
         meta=_app_tool_meta(["model"]),
     )
@@ -477,8 +477,8 @@ def _build_server(host: str, port: int, streamable_http_path: str) -> FastMCP:
         memory = SandraChatMemory()
         snapshot = memory.snapshot(thread_id)
         greeting = (
-            "Sandra's investment chat is ready. The UI will use the configured "
-            "LLM and upstream MCP registry to guide the workbook-backed flow."
+            "Sandra is ready to guide the investment consultation. "
+            "Open the visual chat to begin, or continue here for a text-only flow."
         )
         memory.append_event(
             thread_id=thread_id,

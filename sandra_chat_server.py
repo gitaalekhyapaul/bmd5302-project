@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 import html
 import json
 import logging
@@ -37,6 +38,38 @@ DEFAULT_WORKBOOK_MCP_URL = "http://127.0.0.1:8000/mcp"
 DEFAULT_CHAT_DB_PATH = "notebook_outputs/sandra_chat.sqlite3"
 DEFAULT_CHAT_HOST = "0.0.0.0"
 DEFAULT_CHAT_PORT = 8001
+SANDRA_KB_DIR = PROJECT_ROOT / "sandra_kb"
+SANDRA_PREPROMPT_PATH = SANDRA_KB_DIR / "sandra_preprompt.md"
+SANDRA_KB_PATHS = (
+    SANDRA_KB_DIR / "methodology.md",
+    SANDRA_KB_DIR / "tone_guide.md",
+)
+KB_STOPWORDS = {
+    "about",
+    "after",
+    "again",
+    "also",
+    "and",
+    "are",
+    "but",
+    "can",
+    "for",
+    "from",
+    "have",
+    "how",
+    "into",
+    "that",
+    "the",
+    "this",
+    "through",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+    "you",
+    "your",
+}
 ALLOWED_WORKBOOK_TOOLS = {
     "get_model_workbook_contract",
     "start_investor_questionnaire",
@@ -47,6 +80,14 @@ ALLOWED_WORKBOOK_TOOLS = {
 
 class SandraChatConfigurationError(RuntimeError):
     """Raised when the LLM or MCP registry configuration is incomplete."""
+
+
+@dataclass(frozen=True, slots=True)
+class SandraKbSection:
+    source: str
+    title: str
+    content: str
+    terms: frozenset[str]
 
 
 def _utc_now_iso() -> str:
@@ -330,7 +371,7 @@ class OpenAICompatibleLLM:
             missing.append("SANDRA_LLM_MODEL or OPENAI_MODEL")
         if missing:
             raise SandraChatConfigurationError(
-                "Sandra chat LLM is not configured. Set "
+                "Sandra needs her language model connection configured. Set "
                 + ", ".join(missing)
                 + " in .env."
             )
@@ -389,7 +430,7 @@ class OpenAICompatibleLLM:
             ) from exc
         except APIConnectionError as exc:
             raise SandraChatConfigurationError(
-                "Sandra could not reach the configured LLM provider. Check "
+                "Sandra cannot reach her language model connection right now. Check "
                 "SANDRA_OPENAI_BASE_URL, network access, and provider availability."
             ) from exc
 
@@ -425,7 +466,7 @@ class OpenAICompatibleLLM:
             ) from exc
         except APIConnectionError as exc:
             raise SandraChatConfigurationError(
-                "Sandra could not reach the configured LLM provider for streaming. "
+                "Sandra cannot reach her language model connection for live replies. "
                 "Check SANDRA_OPENAI_BASE_URL, network access, and provider availability."
             ) from exc
 
@@ -479,9 +520,8 @@ class UpstreamMcpRegistry:
             server = self.servers.get(resolved_name)
             url = server.url if server else resolved_name
             raise SandraChatConfigurationError(
-                "Sandra could not connect to the upstream workbook MCP server "
-                f"{resolved_name!r} at {url}. Start or restart ./mcp.sh and verify "
-                "SANDRA_WORKBOOK_MCP_URL points to the workbook MCP endpoint."
+                "Sandra cannot reach the workbook calculation service yet. "
+                f"Start or restart ./mcp.sh and verify SANDRA_WORKBOOK_MCP_URL points to {url}."
             ) from exc
 
     async def get_tool_schema(self, server_name: str, tool_name: str) -> dict[str, Any]:
@@ -518,9 +558,9 @@ class UpstreamMcpRegistry:
             server = self.servers.get(server_name)
             url = server.url if server else server_name
             raise SandraChatConfigurationError(
-                "Sandra could not execute the workbook MCP tool "
-                f"{tool_name!r} on {server_name!r} at {url}. Verify ./mcp.sh is "
-                "running and responsive before retrying."
+                "Sandra reached the workbook connection, but the calculation step did "
+                f"not complete. Verify ./mcp.sh is running and responsive at {url}, "
+                "then try again."
             ) from exc
 
 
@@ -564,6 +604,110 @@ def _openai_tool_spec(server_name: str, tool: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _read_text_or_default(path: Path, default: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        logger.warning("Sandra KB file unavailable: %s", path)
+        return default.strip()
+
+
+def _kb_terms(text: str) -> frozenset[str]:
+    terms = {
+        term
+        for term in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", text.lower())
+        if term not in KB_STOPWORDS
+    }
+    return frozenset(terms)
+
+
+@lru_cache(maxsize=1)
+def _sandra_preprompt() -> str:
+    return _read_text_or_default(
+        SANDRA_PREPROMPT_PATH,
+        (
+            "You are Sandra, a warm, practical, and methodical investment guide. "
+            "Use Model.xlsm as the source of truth for live calculations. "
+            "Do not recreate workbook formulas or optimizer logic. "
+            "Answer methodology questions from the local Sandra knowledge base."
+        ),
+    )
+
+
+def _split_markdown_sections(source: str, text: str) -> list[SandraKbSection]:
+    sections: list[SandraKbSection] = []
+    current_title = source
+    current_lines: list[str] = []
+
+    def flush() -> None:
+        content = "\n".join(current_lines).strip()
+        if content:
+            sections.append(
+                SandraKbSection(
+                    source=source,
+                    title=current_title,
+                    content=content,
+                    terms=_kb_terms(f"{current_title}\n{content}"),
+                )
+            )
+
+    for line in text.splitlines():
+        if line.startswith("## "):
+            flush()
+            current_title = line.removeprefix("## ").strip() or source
+            current_lines = [line]
+        elif line.startswith("# ") and not current_lines:
+            current_title = line.removeprefix("# ").strip() or source
+        else:
+            current_lines.append(line)
+    flush()
+    return sections
+
+
+@lru_cache(maxsize=1)
+def _sandra_kb_sections() -> tuple[SandraKbSection, ...]:
+    sections: list[SandraKbSection] = []
+    for path in SANDRA_KB_PATHS:
+        text = _read_text_or_default(path, "")
+        if text:
+            sections.extend(_split_markdown_sections(path.name, text))
+    return tuple(sections)
+
+
+def _sandra_kb_context(user_message: str, action: str) -> str:
+    query_terms = _kb_terms(f"{user_message} {action}")
+    sections = _sandra_kb_sections()
+    if not sections:
+        return ""
+
+    scored: list[tuple[int, SandraKbSection]] = []
+    for section in sections:
+        overlap = len(query_terms & section.terms)
+        title_bonus = 2 if query_terms & _kb_terms(section.title) else 0
+        source_bonus = 1 if section.source == "tone_guide.md" else 0
+        scored.append((overlap + title_bonus + source_bonus, section))
+
+    selected = [
+        section
+        for score, section in sorted(scored, key=lambda item: item[0], reverse=True)
+        if score > 0
+    ]
+    if not selected:
+        selected = list(sections[:4])
+    selected = selected[:6]
+
+    excerpts = [
+        "Use these Sandra knowledge base excerpts as explanatory context. "
+        "Do not override live workbook results with background figures."
+    ]
+    for section in selected:
+        content = section.content
+        if len(content) > 1800:
+            content = f"{content[:1800].rstrip()}\n..."
+        excerpts.append(f"Source: {section.source}\nSection: {section.title}\n{content}")
+    return "\n\n---\n\n".join(excerpts)
+
+
 def _base_messages(
     *,
     thread_id: str,
@@ -572,16 +716,10 @@ def _base_messages(
     action: str,
 ) -> list[dict[str, Any]]:
     recent = snapshot.get("recent_events", [])[-8:]
-    return [
+    messages = [
         {
             "role": "system",
-            "content": (
-                "You are Sandra, a measured professional financial adviser. "
-                "You must stay grounded in workbook outputs and must not recreate "
-                "Model.xlsm calculations. When a workflow tool is provided, call it. "
-                "Ask for explicit short-selling choice; never assume it. "
-                "State that workbook Ann. Return values are model assumptions, not guarantees."
-            ),
+            "content": _sandra_preprompt(),
         },
         {
             "role": "system",
@@ -592,8 +730,12 @@ def _base_messages(
                 f"Recent memory JSON: {json.dumps(recent, default=str)}"
             ),
         },
-        {"role": "user", "content": user_message},
     ]
+    kb_context = _sandra_kb_context(user_message, action)
+    if kb_context:
+        messages.append({"role": "system", "content": kb_context})
+    messages.append({"role": "user", "content": user_message})
+    return messages
 
 
 def _first_choice_message(response: Any) -> Any:
@@ -735,7 +877,7 @@ def _read_sandra_app_html() -> str:
     if dist_html.exists():
         return dist_html.read_text(encoding="utf-8")
     return """<!doctype html><html><body><h1>Sandra Investment Chat</h1>
-<p>Run <code>npm --prefix mcp_app run build</code>, then restart the server.</p>
+<p>Run <code>npm --prefix mcp_app run build</code>, then restart Sandra's local chat service.</p>
 </body></html>"""
 
 
@@ -856,7 +998,7 @@ class SandraChatOrchestrator:
             "event": "status",
             "payload": {
                 "status": "streaming",
-                "message": "Sandra is composing a workbook-grounded response.",
+                "message": "Sandra is preparing a thoughtful response.",
             },
         }
 
@@ -873,7 +1015,7 @@ class SandraChatOrchestrator:
                 parts.append(token)
                 yield {"event": "token", "payload": {"text": token}}
             assistant_message = "".join(parts).strip() or (
-                "I am ready to guide you through the workbook-backed consultation."
+                "I am ready to guide you through the investment consultation."
             )
             payload = {
                 "status": "completed",
@@ -903,12 +1045,12 @@ class SandraChatOrchestrator:
     @staticmethod
     def _status_for_action(action: str) -> str:
         if action == "start_questionnaire":
-            return "Sandra is opening the workbook questionnaire through MCP."
+            return "Sandra is preparing your risk questionnaire."
         if action == "submit_questionnaire":
-            return "Sandra is writing the selected answer letters back to Model.xlsm."
+            return "Sandra is saving your answers and reading your risk profile."
         if action == "run_mvp":
-            return "Sandra is running the workbook optimizer and chart export flow."
-        return "Sandra is preparing the next workbook-backed response."
+            return "Sandra is running the portfolio model and preparing the charts."
+        return "Sandra is preparing the next response."
 
     async def _run_strict_turn(
         self,
@@ -1082,7 +1224,7 @@ class SandraChatOrchestrator:
             "action": action,
             "assistant_message": _extract_assistant_text(
                 response,
-                "I am ready to guide you through the workbook-backed consultation.",
+                "I am ready to guide you through the investment consultation.",
             ),
         }
 
@@ -1105,15 +1247,15 @@ class SandraChatOrchestrator:
 
 
 def register_sandra_chat_backend_tools(mcp: FastMCP) -> None:
-    """Register LLM-backed app tools on any MCP server."""
+    """Register Sandra app tools on the local MCP surface."""
 
     @mcp.tool(
         name="sandra_chat_turn",
         title="Sandra Chat Turn",
         description=(
-            "App-only LLM orchestration tool. It uses an OpenAI-compatible model "
-            "and an env-configured upstream MCP registry to drive Sandra's strict "
-            "workbook workflow."
+            "App-only entry point for Sandra's guided conversation. It uses the "
+            "configured language model, Sandra's knowledge base, and the workbook "
+            "calculation tools for the requested step."
         ),
         meta=_app_tool_meta(["app"]),
     )
@@ -1138,7 +1280,7 @@ def register_sandra_chat_backend_tools(mcp: FastMCP) -> None:
     @mcp.tool(
         name="sandra_chat_memory_snapshot",
         title="Sandra Chat Memory Snapshot",
-        description="Return Sandra chat SQLite memory for the MCP App.",
+        description="Return Sandra's saved conversation memory for the visual app.",
         meta=_app_tool_meta(["app"]),
     )
     def sandra_chat_memory_snapshot(
@@ -1150,7 +1292,7 @@ def register_sandra_chat_backend_tools(mcp: FastMCP) -> None:
     @mcp.tool(
         name="sandra_chat_record_event",
         title="Record Sandra Chat Event",
-        description="Persist a UI event or note into Sandra chat SQLite memory.",
+        description="Save a visual-app event or note into Sandra's local conversation memory.",
         meta=_app_tool_meta(["app"]),
     )
     def sandra_chat_record_event(
@@ -1348,7 +1490,7 @@ def register_sandra_chat_app(mcp: FastMCP) -> None:
         APP_RESOURCE_URI,
         name="sandra_investment_chat_app",
         title="Sandra Investment Chat",
-        description="Professional MCP App UI for Sandra's LLM-backed investor flow.",
+        description="Professional visual interface for Sandra's guided investment flow.",
         mime_type=APP_RESOURCE_MIME_TYPE,
         meta={
             "ui": {
@@ -1364,7 +1506,7 @@ def register_sandra_chat_app(mcp: FastMCP) -> None:
         name="open_sandra_investment_chat",
         title="Open Sandra Investment Chat",
         description=(
-            "Open Sandra's professional LLM-backed workbook investment chat UI. "
+            "Open Sandra's guided investment chat experience. "
             "Non-UI clients receive a text fallback."
         ),
         meta=_app_tool_meta(["model"]),
@@ -1373,8 +1515,8 @@ def register_sandra_chat_app(mcp: FastMCP) -> None:
         memory = SandraChatMemory()
         snapshot = memory.snapshot(thread_id)
         greeting = (
-            "Sandra's investment chat is ready. The UI will use the configured "
-            "LLM and upstream MCP registry to guide the workbook-backed flow."
+            "Sandra is ready to guide the investment consultation. "
+            "Open the visual chat to begin, or continue here for a text-only flow."
         )
         memory.append_event(
             thread_id=thread_id,

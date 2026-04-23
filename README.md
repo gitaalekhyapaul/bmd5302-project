@@ -129,6 +129,18 @@ The chat backend does not let the LLM freely use arbitrary tools. It enforces st
 - `submit_questionnaire` -> `submit_investor_questionnaire_answers`
 - `run_mvp` -> `run_investor_mvp`
 
+## Sandra Knowledge Base
+
+Sandra's report and methodology context lives in [sandra_kb/](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/sandra_kb:1).
+
+Key files:
+
+- [sandra_preprompt.md](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/sandra_kb/sandra_preprompt.md:1): Sandra's runtime personality, guardrails, and answer style
+- [methodology.md](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/sandra_kb/methodology.md:1): extracted report and workbook methodology covering efficient frontier construction, questionnaire scoring, risk bands, optimizer design, short-selling interpretation, and ethical limits
+- [tone_guide.md](/Users/gitaalekhyapaul/Documents/[Local] BMD5302/bmd5302-project/sandra_kb/tone_guide.md:1): user-facing wording rules
+
+The chat server loads the pre-prompt and retrieves relevant KB sections for each user turn. This gives Sandra source-of-truth context for methodology and investment-strategy questions while preserving the workbook-first rule: live calculations still come from `Model.xlsm`.
+
 The upstream MCP registry is env-configurable. By default it contains one server:
 
 ```bash
