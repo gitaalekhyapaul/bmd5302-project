@@ -205,7 +205,7 @@ The LLM config should be OpenAI-compatible:
 
 The browser API should return structured configuration/provider errors instead of HTTP 500 when the LLM endpoint is missing, unreachable, or misconfigured. The health route should expose redacted diagnostics for model, base URL, and API-key presence.
 
-The browser API should also return structured configuration errors for upstream MCP connection failures, including workbook MCP timeouts, so the UI can tell the operator to restart `./mcp.sh` instead of appearing inert.
+The browser API should also return structured configuration errors for upstream MCP connection failures, including workbook MCP timeouts, so the UI can tell the operator to restart `./mcp.sh` instead of appearing inert. The chat server should apply bounded retry/backoff to transient upstream MCP connection failures, with env knobs for attempts and delay, while avoiding retries for workbook execution or validation errors. Idempotent upstream discovery calls may also retry MCP stream setup failures such as `BrokenResourceError`.
 
 The OpenAI-compatible base URL should be treated as a provider API base, not a full endpoint. If a user configures a URL ending in `/chat/completions`, the chat server should normalize it to the base URL before calling the OpenAI SDK.
 

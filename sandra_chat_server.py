@@ -82,6 +82,18 @@ ALLOWED_WORKBOOK_TOOLS = {
 LOG_MAX_STRING = 400
 LOG_MAX_ITEMS = 12
 LOG_MAX_DEPTH = 4
+UPSTREAM_MCP_RETRY_ATTEMPTS = 3
+UPSTREAM_MCP_RETRY_BASE_SECONDS = 0.5
+UPSTREAM_MCP_RETRY_MAX_SECONDS = 3.0
+UPSTREAM_MCP_RETRYABLE_ERROR_NAMES = {
+    "ConnectError",
+    "ConnectTimeout",
+}
+UPSTREAM_MCP_RETRYABLE_SESSION_SETUP_ERROR_NAMES = {
+    "BrokenResourceError",
+    "ClosedResourceError",
+    "EndOfStream",
+}
 PRIVATE_MODEL_TAGS = ("thought", "think", "thinking", "analysis", "reasoning")
 PRIVATE_MODEL_OPEN_TAG_RE = re.compile(
     rf"<\s*({'|'.join(PRIVATE_MODEL_TAGS)})\s*>",
@@ -173,6 +185,60 @@ def _log_payload(
         json.dumps(_sanitize_for_log(payload), default=str, sort_keys=True),
         exc_info=exc_info,
     )
+
+
+def _env_int(name: str, default: int, *, minimum: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float, *, minimum: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return max(minimum, float(raw))
+    except ValueError:
+        return default
+
+
+def _walk_exception_tree(exc: BaseException) -> list[BaseException]:
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    flattened: list[BaseException] = []
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        flattened.append(current)
+        if isinstance(current, BaseExceptionGroup):
+            stack.extend(current.exceptions)
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
+    return flattened
+
+
+def _is_retryable_upstream_connection_error(
+    exc: BaseException,
+    *,
+    include_session_setup_errors: bool = False,
+) -> bool:
+    retryable_names = set(UPSTREAM_MCP_RETRYABLE_ERROR_NAMES)
+    if include_session_setup_errors:
+        retryable_names.update(UPSTREAM_MCP_RETRYABLE_SESSION_SETUP_ERROR_NAMES)
+    for nested in _walk_exception_tree(exc):
+        name = type(nested).__name__
+        if name in retryable_names:
+            return True
+    return False
 
 
 def _message_log_summary(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -789,11 +855,60 @@ class UpstreamMcpRegistry:
         if not servers:
             raise SandraChatConfigurationError("At least one upstream MCP server is required.")
         self.servers = {server.name: server for server in servers if server.enabled}
+        self.retry_attempts = _env_int(
+            "SANDRA_UPSTREAM_MCP_RETRY_ATTEMPTS",
+            UPSTREAM_MCP_RETRY_ATTEMPTS,
+            minimum=1,
+        )
+        self.retry_base_seconds = _env_float(
+            "SANDRA_UPSTREAM_MCP_RETRY_BASE_SECONDS",
+            UPSTREAM_MCP_RETRY_BASE_SECONDS,
+            minimum=0.0,
+        )
+        self.retry_max_seconds = _env_float(
+            "SANDRA_UPSTREAM_MCP_RETRY_MAX_SECONDS",
+            UPSTREAM_MCP_RETRY_MAX_SECONDS,
+            minimum=0.0,
+        )
 
     def default_server_name(self) -> str:
         if "workbook" in self.servers:
             return "workbook"
         return next(iter(self.servers))
+
+    def _retry_delay_seconds(self, attempt: int) -> float:
+        delay = self.retry_base_seconds * (2 ** max(0, attempt - 1))
+        if self.retry_max_seconds > 0:
+            delay = min(delay, self.retry_max_seconds)
+        return delay
+
+    async def _wait_before_retry(
+        self,
+        *,
+        operation: str,
+        server_name: str,
+        tool_name: str | None,
+        url: str,
+        attempt: int,
+        exc: BaseException,
+    ) -> None:
+        delay = self._retry_delay_seconds(attempt)
+        _log_payload(
+            logging.WARNING,
+            f"upstream.{operation} retrying after connection failure",
+            {
+                "server_name": server_name,
+                "tool_name": tool_name,
+                "url": url,
+                "attempt": attempt,
+                "max_attempts": self.retry_attempts,
+                "retry_delay_seconds": delay,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        if delay > 0:
+            await asyncio.sleep(delay)
 
     @asynccontextmanager
     async def session(self, server_name: str) -> Any:
@@ -818,38 +933,73 @@ class UpstreamMcpRegistry:
 
     async def list_tools(self, server_name: str | None = None) -> dict[str, Any]:
         resolved_name = server_name or self.default_server_name()
-        try:
-            logger.info("upstream.list_tools request server=%s", resolved_name)
-            async with self.session(resolved_name) as session:
-                result = await session.list_tools()
-                payload = {
-                    "server_name": resolved_name,
-                    "tools": [
-                        {
-                            "name": tool.name,
-                            "title": tool.title,
-                            "description": tool.description,
-                            "input_schema": tool.inputSchema,
-                        }
-                        for tool in result.tools
-                        if tool.name in ALLOWED_WORKBOOK_TOOLS
-                    ],
-                }
-                _log_payload(logging.INFO, "upstream.list_tools response", payload)
-                return payload
-        except Exception as exc:
-            server = self.servers.get(resolved_name)
-            url = server.url if server else resolved_name
-            _log_payload(
-                logging.ERROR,
-                "upstream.list_tools failed",
-                {"server_name": resolved_name, "url": url},
-                exc_info=True,
-            )
-            raise SandraChatConfigurationError(
-                "Sandra cannot reach the workbook calculation service yet. "
-                f"Start or restart ./mcp.sh and verify SANDRA_WORKBOOK_MCP_URL points to {url}."
-            ) from exc
+        server = self.servers.get(resolved_name)
+        url = server.url if server else resolved_name
+        last_exc: Exception | None = None
+        for attempt in range(1, self.retry_attempts + 1):
+            try:
+                _log_payload(
+                    logging.INFO,
+                    "upstream.list_tools request",
+                    {
+                        "server_name": resolved_name,
+                        "attempt": attempt,
+                        "max_attempts": self.retry_attempts,
+                    },
+                )
+                async with self.session(resolved_name) as session:
+                    result = await session.list_tools()
+                    payload = {
+                        "server_name": resolved_name,
+                        "tools": [
+                            {
+                                "name": tool.name,
+                                "title": tool.title,
+                                "description": tool.description,
+                                "input_schema": tool.inputSchema,
+                            }
+                            for tool in result.tools
+                            if tool.name in ALLOWED_WORKBOOK_TOOLS
+                        ],
+                    }
+                    _log_payload(logging.INFO, "upstream.list_tools response", payload)
+                    return payload
+            except Exception as exc:
+                last_exc = exc
+                retryable = _is_retryable_upstream_connection_error(
+                    exc,
+                    include_session_setup_errors=True,
+                )
+                if retryable and attempt < self.retry_attempts:
+                    await self._wait_before_retry(
+                        operation="list_tools",
+                        server_name=resolved_name,
+                        tool_name=None,
+                        url=url,
+                        attempt=attempt,
+                        exc=exc,
+                    )
+                    continue
+                _log_payload(
+                    logging.ERROR,
+                    "upstream.list_tools failed",
+                    {
+                        "server_name": resolved_name,
+                        "url": url,
+                        "attempt": attempt,
+                        "max_attempts": self.retry_attempts,
+                        "retryable": retryable,
+                    },
+                    exc_info=True,
+                )
+                raise SandraChatConfigurationError(
+                    "Sandra cannot reach the workbook calculation service yet. "
+                    f"Start or restart ./mcp.sh and verify SANDRA_WORKBOOK_MCP_URL points to {url}."
+                ) from exc
+        raise SandraChatConfigurationError(
+            "Sandra cannot reach the workbook calculation service yet. "
+            f"Start or restart ./mcp.sh and verify SANDRA_WORKBOOK_MCP_URL points to {url}."
+        ) from last_exc
 
     async def get_tool_schema(self, server_name: str, tool_name: str) -> dict[str, Any]:
         logger.info("upstream.get_tool_schema request server=%s tool=%s", server_name, tool_name)
@@ -874,64 +1024,89 @@ class UpstreamMcpRegistry:
             raise SandraChatConfigurationError(
                 f"Tool {tool_name!r} is not allowed in Sandra's strict workflow."
             )
-        try:
-            _log_payload(
-                logging.INFO,
-                "upstream.call_tool request",
-                {
-                    "server_name": server_name,
-                    "tool_name": tool_name,
-                    "arguments": arguments,
-                },
-            )
-            async with self.session(server_name) as session:
-                if progress_callback is not None and tool_name == "run_investor_mvp":
-                    result = await self._call_tool_with_progress(
-                        session=session,
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        progress_callback=progress_callback,
-                    )
-                else:
-                    result = await session.call_tool(tool_name, arguments)
-                if result.isError:
-                    payload = {
-                        "status": "error",
-                        "is_error": True,
-                        "content": _content_to_text(result.content),
-                    }
-                    _log_payload(logging.WARNING, "upstream.call_tool error response", payload)
-                    return payload
-                payload = _call_tool_result_to_payload(result)
+        server = self.servers.get(server_name)
+        url = server.url if server else server_name
+        last_exc: Exception | None = None
+        for attempt in range(1, self.retry_attempts + 1):
+            try:
                 _log_payload(
                     logging.INFO,
-                    "upstream.call_tool response",
+                    "upstream.call_tool request",
                     {
                         "server_name": server_name,
                         "tool_name": tool_name,
-                        "payload": payload,
+                        "arguments": arguments,
+                        "attempt": attempt,
+                        "max_attempts": self.retry_attempts,
                     },
                 )
-                return payload
-        except Exception as exc:
-            server = self.servers.get(server_name)
-            url = server.url if server else server_name
-            _log_payload(
-                logging.ERROR,
-                "upstream.call_tool failed",
-                {
-                    "server_name": server_name,
-                    "tool_name": tool_name,
-                    "arguments": arguments,
-                    "url": url,
-                },
-                exc_info=True,
-            )
-            raise SandraChatConfigurationError(
-                "Sandra reached the workbook connection, but the calculation step did "
-                f"not complete. Verify ./mcp.sh is running and responsive at {url}, "
-                "then try again."
-            ) from exc
+                async with self.session(server_name) as session:
+                    if progress_callback is not None and tool_name == "run_investor_mvp":
+                        result = await self._call_tool_with_progress(
+                            session=session,
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            progress_callback=progress_callback,
+                        )
+                    else:
+                        result = await session.call_tool(tool_name, arguments)
+                    if result.isError:
+                        payload = {
+                            "status": "error",
+                            "is_error": True,
+                            "content": _content_to_text(result.content),
+                        }
+                        _log_payload(logging.WARNING, "upstream.call_tool error response", payload)
+                        return payload
+                    payload = _call_tool_result_to_payload(result)
+                    _log_payload(
+                        logging.INFO,
+                        "upstream.call_tool response",
+                        {
+                            "server_name": server_name,
+                            "tool_name": tool_name,
+                            "attempt": attempt,
+                            "payload": payload,
+                        },
+                    )
+                    return payload
+            except Exception as exc:
+                last_exc = exc
+                retryable = _is_retryable_upstream_connection_error(exc)
+                if retryable and attempt < self.retry_attempts:
+                    await self._wait_before_retry(
+                        operation="call_tool",
+                        server_name=server_name,
+                        tool_name=tool_name,
+                        url=url,
+                        attempt=attempt,
+                        exc=exc,
+                    )
+                    continue
+                _log_payload(
+                    logging.ERROR,
+                    "upstream.call_tool failed",
+                    {
+                        "server_name": server_name,
+                        "tool_name": tool_name,
+                        "arguments": arguments,
+                        "url": url,
+                        "attempt": attempt,
+                        "max_attempts": self.retry_attempts,
+                        "retryable": retryable,
+                    },
+                    exc_info=True,
+                )
+                raise SandraChatConfigurationError(
+                    "Sandra reached the workbook connection, but the calculation step did "
+                    f"not complete. Verify ./mcp.sh is running and responsive at {url}, "
+                    "then try again."
+                ) from exc
+        raise SandraChatConfigurationError(
+            "Sandra reached the workbook connection, but the calculation step did "
+            f"not complete. Verify ./mcp.sh is running and responsive at {url}, "
+            "then try again."
+        ) from last_exc
 
     async def _call_tool_with_progress(
         self,

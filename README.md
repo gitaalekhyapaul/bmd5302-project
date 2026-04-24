@@ -241,7 +241,15 @@ Do not include `/chat/completions` in `SANDRA_OPENAI_BASE_URL`; the OpenAI SDK a
 
 If `/api/chat` returns `configuration_required`, check `http://127.0.0.1:8001/api/health` for the redacted LLM diagnostics.
 
-If Sandra cannot reach the upstream workbook MCP server, the browser API returns a `configuration_required` payload instead of HTTP 500. Restart `./mcp.sh` and verify `SANDRA_WORKBOOK_MCP_URL` points at `http://127.0.0.1:8000/mcp`.
+If Sandra cannot reach the upstream workbook MCP server, the browser API returns a `configuration_required` payload instead of HTTP 500. The chat server retries transient upstream MCP connection failures, such as `ConnectTimeout`, before giving up. For idempotent tool discovery, it also retries MCP stream setup failures such as `BrokenResourceError`, which can wrap a timed-out POST writer. Restart `./mcp.sh` and verify `SANDRA_WORKBOOK_MCP_URL` points at `http://127.0.0.1:8000/mcp`.
+
+Optional upstream MCP retry knobs:
+
+```bash
+SANDRA_UPSTREAM_MCP_RETRY_ATTEMPTS=3
+SANDRA_UPSTREAM_MCP_RETRY_BASE_SECONDS=0.5
+SANDRA_UPSTREAM_MCP_RETRY_MAX_SECONDS=3.0
+```
 
 ## Notebook Test Surface
 
