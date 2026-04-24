@@ -144,6 +144,8 @@ For deterministic UI steps, the chat backend does not wait for an extra post-too
 
 Freeform `action="message"` turns remain chat-first, but they are no longer routed by hardcoded keyword rules. When the saved thread state is already at a session-backed stage such as `profile` or `completed`, the chat backend gives the LLM a small set of session-safe local actions, such as replaying the latest saved workbook outputs or rerunning `run_investor_mvp` with an explicit short-selling flag, and lets the model decide whether to call one of them or answer normally. The browser chat UI renders replayed and rerun table/chart payloads directly in the conversation when the model chooses those actions.
 
+Some OpenAI-compatible providers may emit scratchpad-style tags such as `<thought>` in normal chat content. The chat backend strips those private blocks before streaming, storing, or returning user-facing assistant messages. The browser app also renders inline and block LaTeX from Sandra's Markdown replies with KaTeX, so formulas such as `$A_{final}$` and `$$U = r - \frac{A}{2}\sigma^2$$` display as math instead of raw dollar-delimited text.
+
 During a real `run_mvp` workbook execution, the browser SSE stream now forwards step-level status updates from the workbook side instead of staying silent until the final payload arrives. Those statuses are sourced from the shared session progress state written during the MVP run.
 
 ## Sandra Knowledge Base

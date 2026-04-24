@@ -172,6 +172,7 @@ The app flow should be:
 - during `run_mvp`, the main workbook server should persist session-scoped progress state and the chat backend should forward each new progress milestone as a browser SSE `status` event while the upstream tool call is still running
 - freeform `message` turns should remain chat-first by default, but once the saved thread state reaches a session-backed stage such as `profile` or `completed`, the backend should expose only a small set of session-safe local actions to the LLM and let the model decide whether to answer normally, replay the latest saved workbook outputs, or rerun `run_investor_mvp`
 - message intent routing should avoid hardcoded keyword classifiers; the only hard bounds should be the current workflow stage, available local action definitions, and explicit tool schemas such as the required boolean short-selling flag for an MVP rerun
+- user-facing LLM text should be sanitized before it reaches memory or the browser stream, including removal of provider-emitted scratchpad tags such as `<thought>`; the browser should render common LaTeX math in Markdown replies with KaTeX
 - the upstream MCP registry defaults to the workbook server at `SANDRA_WORKBOOK_MCP_URL`
 - the workbook MCP server starts the questionnaire with `use_source_workbook=True`
 - the chat backend renders the questionnaire form HTML from workbook-generated questions

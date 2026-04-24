@@ -7,7 +7,9 @@ import {
 } from "@modelcontextprotocol/ext-apps";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import DOMPurify from "dompurify";
+import "katex/dist/katex.min.css";
 import { marked } from "marked";
+import markedKatex from "marked-katex-extension";
 import "./sandra-app.css";
 
 type ToolPayload = Record<string, unknown>;
@@ -41,6 +43,7 @@ const fullscreenButton = document.getElementById("fullscreen-button") as HTMLBut
 
 const app = new App({ name: "Sandra Investment Chat", version: "1.0.0" });
 marked.setOptions({ breaks: true, gfm: true });
+marked.use(markedKatex({ throwOnError: false, nonStandard: true }));
 let chartLightboxFallbackMaximized = false;
 
 function loadThreadId(): string {

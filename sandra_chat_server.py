@@ -82,6 +82,19 @@ ALLOWED_WORKBOOK_TOOLS = {
 LOG_MAX_STRING = 400
 LOG_MAX_ITEMS = 12
 LOG_MAX_DEPTH = 4
+PRIVATE_MODEL_TAGS = ("thought", "think", "thinking", "analysis", "reasoning")
+PRIVATE_MODEL_OPEN_TAG_RE = re.compile(
+    rf"<\s*({'|'.join(PRIVATE_MODEL_TAGS)})\s*>",
+    re.IGNORECASE,
+)
+PRIVATE_MODEL_BLOCK_RE = re.compile(
+    rf"<\s*({'|'.join(PRIVATE_MODEL_TAGS)})\s*>.*?<\s*/\s*\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+PRIVATE_MODEL_CLOSE_TAG_RE = re.compile(
+    rf"<\s*/\s*({'|'.join(PRIVATE_MODEL_TAGS)})\s*>",
+    re.IGNORECASE,
+)
 
 
 class SandraChatConfigurationError(RuntimeError):
@@ -203,6 +216,70 @@ def _llm_response_summary(response: Any) -> dict[str, Any]:
             for tool_call in tool_calls
         ],
     }
+
+
+def _strip_private_model_text(text: str) -> str:
+    """Remove provider-emitted scratchpad tags before user-facing storage/output."""
+    cleaned = str(text)
+    previous = None
+    while previous != cleaned:
+        previous = cleaned
+        cleaned = PRIVATE_MODEL_BLOCK_RE.sub("", cleaned)
+    cleaned = PRIVATE_MODEL_CLOSE_TAG_RE.sub("", cleaned)
+    unclosed = PRIVATE_MODEL_OPEN_TAG_RE.search(cleaned)
+    if unclosed and not cleaned[: unclosed.start()].strip():
+        cleaned = ""
+    return cleaned.strip()
+
+
+class PrivateModelTextStreamFilter:
+    """Incrementally hide tagged model scratchpad text from browser SSE tokens."""
+
+    _lookbehind_chars = 32
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._inside_tag: str | None = None
+
+    def feed(self, chunk: str) -> str:
+        self._pending += str(chunk)
+        output: list[str] = []
+        while self._pending:
+            if self._inside_tag:
+                close_re = re.compile(
+                    rf"<\s*/\s*{re.escape(self._inside_tag)}\s*>",
+                    re.IGNORECASE,
+                )
+                close_match = close_re.search(self._pending)
+                if close_match is None:
+                    self._pending = self._pending[-self._lookbehind_chars :]
+                    break
+                self._pending = self._pending[close_match.end() :]
+                self._inside_tag = None
+                continue
+
+            open_match = PRIVATE_MODEL_OPEN_TAG_RE.search(self._pending)
+            if open_match is not None:
+                output.append(self._pending[: open_match.start()])
+                self._inside_tag = str(open_match.group(1)).lower()
+                self._pending = self._pending[open_match.end() :]
+                continue
+
+            emit_len = max(0, len(self._pending) - self._lookbehind_chars)
+            if emit_len:
+                output.append(self._pending[:emit_len])
+                self._pending = self._pending[emit_len:]
+            break
+        return "".join(output)
+
+    def flush(self) -> str:
+        if self._inside_tag:
+            self._pending = ""
+            self._inside_tag = None
+            return ""
+        remaining = self._pending
+        self._pending = ""
+        return remaining
 
 
 def _request_log_context(request: Request) -> dict[str, Any]:
@@ -1088,11 +1165,17 @@ def _first_choice_message(response: Any) -> Any:
 
 
 def _message_to_dict(message: Any) -> dict[str, Any]:
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        content = _strip_private_model_text(content)
     if hasattr(message, "model_dump"):
-        return message.model_dump(exclude_none=True)
+        payload = message.model_dump(exclude_none=True)
+        if isinstance(payload, dict) and isinstance(payload.get("content"), str):
+            payload["content"] = _strip_private_model_text(str(payload["content"]))
+        return payload
     return {
         "role": getattr(message, "role", "assistant"),
-        "content": getattr(message, "content", None),
+        "content": content,
         "tool_calls": getattr(message, "tool_calls", None),
     }
 
@@ -1102,7 +1185,10 @@ def _extract_assistant_text(response: Any, fallback: str) -> str:
     if message is None:
         return fallback
     content = getattr(message, "content", None)
-    return str(content).strip() if content else fallback
+    if not content:
+        return fallback
+    cleaned = _strip_private_model_text(str(content))
+    return cleaned if cleaned else fallback
 
 
 def _clean_questionnaire_option_text(option: Any, letter: Any) -> str:
@@ -1467,12 +1553,25 @@ class SandraChatOrchestrator:
                     user_message=user_message,
                     action=action,
                 )
-                parts: list[str] = []
+                raw_parts: list[str] = []
+                visible_parts: list[str] = []
+                token_filter = PrivateModelTextStreamFilter()
                 async for token in self.llm.stream_chat_completion_text(messages=messages):
-                    parts.append(token)
-                    yield {"event": "token", "payload": {"text": token}}
-                assistant_message = "".join(parts).strip() or (
+                    raw_parts.append(token)
+                    visible_token = token_filter.feed(token)
+                    if visible_token:
+                        visible_parts.append(visible_token)
+                        yield {"event": "token", "payload": {"text": visible_token}}
+                tail = token_filter.flush()
+                if tail:
+                    visible_parts.append(tail)
+                    yield {"event": "token", "payload": {"text": tail}}
+                assistant_message = (
+                    _strip_private_model_text("".join(raw_parts))
+                    or "".join(visible_parts).strip()
+                    or (
                     "I am ready to guide you through the investment consultation."
+                    )
                 )
                 payload = {
                     "status": "completed",

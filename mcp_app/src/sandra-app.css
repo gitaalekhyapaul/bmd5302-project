@@ -224,6 +224,14 @@
     @apply rounded-md border border-[rgba(216,196,146,0.14)] bg-black/25 px-1.5 py-0.5 text-[0.9em] text-gold-strong;
   }
 
+  .markdown .katex {
+    @apply text-gold-strong;
+  }
+
+  .markdown .katex-display {
+    @apply my-4 overflow-x-auto rounded-xl border border-[rgba(216,196,146,0.2)] bg-black/25 px-4 py-3;
+  }
+
   .markdown pre {
     @apply overflow-x-auto rounded-2xl border border-[rgba(216,196,146,0.14)] bg-black/30 p-3;
   }
